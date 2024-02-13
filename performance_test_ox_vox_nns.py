@@ -21,10 +21,6 @@ import pytest
 
 from sklearn.neighbors import KDTree
 
-import rustimport
-
-rustimport.settings.release_mode = True
-import rustimport.import_hook
 import ox_vox_nns
 
 

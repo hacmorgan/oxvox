@@ -17,7 +17,6 @@ import numpy as np
 import numpy.lib.recfunctions as rf
 import pytest
 
-# import rustimport.import_hook
 import ox_vox_nns
 
 
@@ -129,7 +128,4 @@ def test_find_neighbours() -> None:
     assert np.allclose(distances, [0.0, 0.173, 3.410], atol=0.001)
     
     
-def test_find_neighbours_parallel() -> None:
-    """
-    
-    """
+

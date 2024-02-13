@@ -17,7 +17,7 @@ import numpy as np
 import numpy.lib.recfunctions as rf
 import pytest
 
-import rustimport.import_hook
+# import rustimport.import_hook
 import ox_vox_nns
 
 

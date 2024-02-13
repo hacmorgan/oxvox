@@ -53,12 +53,12 @@ def compare_performance_find_neighbours() -> int:
     )
     print(f"Found neighbours using OxVoxNNS in {time()-start}s")
 
-    # # SKLearn
-    # start = time()
-    # distances, indices = KDTree(search_points, metric="euclidean").query(
-    #     query_points, num_neighbours, return_distance=True, dualtree=False
-    # )
-    # print(f"Found neighbours using KDTree in {time()-start}s")
+    # SKLearn
+    start = time()
+    distances, indices = KDTree(search_points, metric="euclidean").query(
+        query_points, num_neighbours, return_distance=True, dualtree=False
+    )
+    print(f"Found neighbours using KDTree in {time()-start}s")
 
     return 0
 

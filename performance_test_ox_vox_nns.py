@@ -44,12 +44,13 @@ def compare_performance_find_neighbours() -> int:
     max_dist = 0.05
     voxel_size = 0.1
     start = time()
-    indices, distances = ox_vox_nns.find_neighbours(
+    ox_vox_nns.OxVoxNNS(
         search_points,
-        query_points,
-        num_neighbours,
         max_dist,
         voxel_size,
+    ).find_neighbours(
+        query_points,
+        num_neighbours,
     )
     print(f"Found neighbours using OxVoxNNS in {time()-start}s")
 

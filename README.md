@@ -1,5 +1,21 @@
 # OxVoxNNS - Oxidised Voxelised Nearest Neighbour Search
-A performant (for large numbers of points) nearest neighbour search implemented in rust
+A performant (for large numbers of query points) nearest neighbour search implemented in rust
+
+# Usage
+Basic usage:
+
+```
+from ox_vox_nns.ox_vox_nns import OxVoxNNS
+
+indices, distances = ox_vox_nns.OxVoxNNS(
+    search_points,
+    max_dist,
+    voxel_size,
+).find_neighbours(
+    query_points,
+    num_neighbours
+)
+```
 
 ## TODO
 ### PyPI

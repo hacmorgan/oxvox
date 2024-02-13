@@ -120,10 +120,16 @@ def test_find_neighbours() -> None:
     voxel_size = 0.3
 
     nns = ox_vox_nns.OxVoxNNS(search_points, max_dist, voxel_size)
-
     indices, distances = nns.find_neighbours(
         query_points,
         num_neighbours,
     )
+    
     assert np.all(indices == [0, 1, 2])
     assert np.allclose(distances, [0.0, 0.173, 3.410], atol=0.001)
+    
+    
+def test_find_neighbours_parallel() -> None:
+    """
+    
+    """

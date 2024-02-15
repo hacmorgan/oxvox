@@ -9,6 +9,10 @@ name = "ox_vox_nns"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.18.0"
+bincode = "1.3.3"
 numpy = "0.18"
+ndarray = {version = "0.15.6", features=["serde"]}
+pyo3 = "0.18.0"
 rayon = "1.8.1"
+serde = {version = "1.0.196", features = ["derive"]}
+indicatif = {version = "0.17.8", features = ["rayon"]}

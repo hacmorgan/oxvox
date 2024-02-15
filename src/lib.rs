@@ -1,29 +1,33 @@
-
 use std::collections::HashMap;
 
+use bincode::{deserialize, serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::vec;
 
 use numpy::ndarray::{Array2, ArrayView1, ArrayView2, ArrayViewMut1, Axis};
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
-use pyo3::{
-    pyclass, pymethods, pymodule,
-    types::{PyModule}, PyResult, Python,
-};
+use pyo3::types::{PyBytes, PyModule};
+use pyo3::methods::OkWrap;
+use pyo3::{pyclass, pymethods, pymodule, PyResult, Python, PyErr};
+use indicatif::ProgressIterator;
 
 use rayon::prelude::*;
 
 const MIN_LAYERS_FOR_SAFE_POINTS: usize = 6;
 
-#[pyclass]
+#[derive(Serialize, Deserialize)]
+#[pyclass(module = "ox_vox_nns")]  // required for python to serialise correctly
 struct OxVoxNNS {
     search_points: Array2<f32>,
     points_by_voxel: HashMap<(i32, i32, i32), Vec<i32>>,
     voxel_offsets: Vec<Vec<Vec<i32>>>,
+    max_dist: f32,
     voxel_size: f32,
 }
 
 #[pymethods]
 impl OxVoxNNS {
+    /// Constructor for OxVoxNNS object
     #[new]
     fn new(search_points: PyReadonlyArray2<f32>, max_dist: f32, voxel_size: f32) -> Self {
         // Convert search points to rust ndarray
@@ -39,7 +43,32 @@ impl OxVoxNNS {
         let voxel_offsets = construct_voxel_offsets(num_levels);
 
         // Construct the NNS object with computed values required for querying
-        OxVoxNNS{search_points, points_by_voxel, voxel_offsets, voxel_size}
+        OxVoxNNS {
+            search_points,
+            points_by_voxel,
+            voxel_offsets,
+            max_dist,
+            voxel_size,
+        }
+    }
+
+    /// Implement deserialisation (unpickling) for OxVoxNNS objects
+    pub fn __setstate__(&mut self, state: &PyBytes) -> PyResult<()> {
+        *self = deserialize(state.as_bytes()).unwrap();
+        Ok(())
+    }
+
+    /// Implement serialisation (pickling) for OxVoxNNS objects
+    pub fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<&'py PyBytes> {
+        Ok(PyBytes::new(py, &serialize(&self).unwrap()))
+    }
+
+    /// How to construct a new OxVoxNNS object from an existing one (needed for pickling)
+    pub fn __getnewargs__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> (&'py PyArray2<f32>, f32, f32) {
+        (&self.search_points.clone().into_pyarray(py), self.max_dist, self.voxel_size)
     }
 
     /// Python wrapper for find_neighbours
@@ -124,6 +153,7 @@ fn find_neighbours(
         .axis_iter(Axis(0))
         .zip(indices.axis_iter_mut(Axis(0)))
         .zip(distances.axis_iter_mut(Axis(0)))
+        .progress_count(num_query_points as u64)
         .for_each(|((query_point, indices_row), distances_row)| {
             find_query_point_neighbours(
                 query_point,
@@ -316,7 +346,8 @@ fn find_query_point_neighbours(
     let num_neighbours_required = num_neighbours as usize - num_safe_points;
     let mut remaining_points: Vec<(i32, f32)> =
         neighbours.iter().skip(num_safe_points).cloned().collect();
-    remaining_points.par_sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    remaining_points.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    // remaining_points.par_sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
     for (j, (point_idx, distance)) in remaining_points
         .iter()
         .take(num_neighbours_required)
@@ -365,4 +396,3 @@ fn construct_voxel_offsets(num_levels: i32) -> Vec<Vec<Vec<i32>>> {
 fn voxel_coord(point_coord: f32, voxel_size: f32) -> i32 {
     (point_coord / voxel_size) as i32
 }
-

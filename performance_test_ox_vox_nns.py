@@ -17,100 +17,263 @@ import numpy as np
 from time import time
 from typing import Tuple
 import numpy.typing as npt
+import json
 import sys
+import cloudpickle
+import pickle
+import tqdm
 import numpy.lib.recfunctions as rf
 from p_tqdm import p_imap
 from functools import partial
 
-from sklearn.neighbors import KDTree
+# Competitor NNS algorithms
+from scipy.spatial import KDTree as SciPyKDTree
+from sklearn.neighbors import KDTree as SkLearnKDTree
+import open3d as o3d
 
-from ox_vox_nns import OxVoxNNS
+# Our NNS algorithm
+from ox_vox_nns.ox_vox_nns import OxVoxNNS
+
+from abyss.bedrock.io.convenience import easy_load
+
+SEARCH_POINTS_IRL = rf.structured_to_unstructured(
+    easy_load("/home/hmo/tmp/DEEPL-1947/4.bin")[["x", "y", "z"]]
+).astype(np.float32)[::4][:100000]
+SEARCH_POINTS_1M_UNIFORM = np.random.random((16_000_000, 3)).astype(np.float32) * 15
+SEARCH_POINTS_1M_CLUSTERS = np.vstack(
+    [
+        # Generate a cluster of random points
+        np.random.random((1_600_000, 3)).astype(np.float32)
+        # Move cluster somewhere randomly
+        + np.random.random((1, 3)).astype(np.float32) * 15
+    ]
+    * 10
+)
 
 
-NUM_POINTS = 1_000_000
-TEST_ARRAY = np.random.random((NUM_POINTS, 3)).astype(np.float32) * 15
+TEST_INPUTS = {
+    "irl": {
+        "search_points": SEARCH_POINTS_IRL,
+        "query_points": SEARCH_POINTS_IRL,
+        "num_neighbours": 800,
+        "max_dist": 0.05,
+        "voxel_size": 0.05,
+        "batch_size": 40_000,
+    },
+    "1m-uniform": {
+        "search_points": SEARCH_POINTS_1M_UNIFORM,
+        "query_points": SEARCH_POINTS_1M_UNIFORM,
+        "num_neighbours": 800,
+        "max_dist": 0.05,
+        "voxel_size": 0.1,
+        "batch_size": 40_000,
+    },
+    "1m-clusters": {
+        "search_points": SEARCH_POINTS_1M_CLUSTERS,
+        "query_points": SEARCH_POINTS_1M_CLUSTERS,
+        "num_neighbours": 800,
+        "max_dist": 0.05,
+        "voxel_size": 0.05,
+        "batch_size": 40_000,
+    },
+}
 
 
-
-
-def compare_performance_find_neighbours(test_data: npt.NDArray[np.float32]) -> int:
+def compare_performance() -> int:
     """
     Compare performance of NNS algorithms
     """
-    # NNS parameters and test data
-    search_points = test_data
-    query_points = test_data
-    num_neighbours = 800
+    # Construct dict for output data
+    results = {}
 
-    # OxVoxNNS
-    max_dist = 0.05
-    voxel_size = 0.1
-    start = time()
-    indices, distances = OxVoxNNS(search_points, max_dist, voxel_size).find_neighbours(
-        query_points,
-        num_neighbours,
-    )
-    print(f"Found neighbours using OxVoxNNS in {time()-start}s")
+    for data_name, params in TEST_INPUTS.items():
 
-    # # SKLearn (Compiled C++)
-    # start = time()
-    # distances, indices = KDTree(search_points, metric="euclidean").query(
-    #     query_points, num_neighbours, return_distance=True, dualtree=False
-    # )
-    # print(f"Found neighbours using KDTree in {time()-start}s")
-    
-    # SKLearn with python parallelism
-    batch_size = 5000
-    start = time()
-    # Construct output arrays up front (we will fill them in in chunks)
-    indices = np.full(
-        (NUM_POINTS, num_neighbours), fill_value=-1
-    )
-    distances = np.full(
-        (NUM_POINTS, num_neighbours), fill_value=-1
-    )
-    # Map processing function across batches of query points
-    batch_start_indices = range(0, NUM_POINTS, batch_size)
-    query_point_batches = (
-        query_points[i : i + batch_size, :] for i in batch_start_indices
-    )
-    process_batch_preconfigured = partial(process_batch, tree=KDTree(search_points, metric="euclidean"), num_neighbours=num_neighbours)
-    processed_batches = p_imap(process_batch_preconfigured, query_point_batches)
-    # Insert reults back into array
-    for batch_idx, (indices_batch, distances_batch) in zip(batch_start_indices, processed_batches):
-        indices[batch_idx : batch_idx + batch_size, :] = indices_batch
-        distances[batch_idx : batch_idx + batch_size, :] = distances_batch
-    print(f"Found neighbours using parallel KDTree in {time()-start}s")
+        results[data_name] = {}
 
-    # Scipy (Native Python - TODO)
+        for algo_name, algo in {
+            # "scipy": _scipy_nns,
+            # "sklearn": _sklearn_nns,
+            "oxvox": _oxvox_nns,
+            "open3d": _o3d_nns,
+            "sklearn-multiproc": _sklearn_nns_multiproc,
+            "oxvox-multiproc": _oxvox_nns_multiproc,
+        }.items():
 
-    # Open3d (C++ with parallelism - TODO)
+            sys.stdout.write(
+                f"Searching for nearest neighbours in dataset {data_name} using algorithm: {algo_name}... "
+            )
+            sys.stdout.flush()
+            start = time()
+            indices, distances = algo(**params)
+            compute_time = time() - start
+            print(f"Done in {compute_time}s")
+            sys.stdout.flush()
+            results[data_name][algo_name] = compute_time
+
+    print(json.dumps(results))
 
     return 0
 
 
-def process_batch(
-    query_points_chunk: npt.NDArray[np.float32], tree: KDTree, num_neighbours: int
+"""
+Wrappers around NNS implementations (with common usage semantics) below
+"""
+
+
+def _scipy_nns(
+    search_points: npt.NDArray[np.float32],
+    query_points: npt.NDArray[np.float32],
+    num_neighbours: int,
+    **kwargs,
 ) -> Tuple[npt.NDArray[np.int32], npt.NDArray[np.float32]]:
+    """
+    Run nearest neighbour search using scipy
+    """
+    distances, indices = SciPyKDTree(search_points).query(
+        query_points, k=num_neighbours
+    )
+    return indices, distances
 
-    # Find neighbours for this chunk of points
-    return tree.query(query_points_chunk, num_neighbours, return_distance=True, dualtree=False)
 
-    # print(f"Found neighbours using OxVoxNNS in {time()-start}s")
+def _sklearn_nns(
+    search_points: npt.NDArray[np.float32],
+    query_points: npt.NDArray[np.float32],
+    num_neighbours: int,
+    **kwargs,
+) -> Tuple[npt.NDArray[np.int32], npt.NDArray[np.float32]]:
+    """
+    Run nearest neighbour search using sklearn (single-threaded)
+    """
+    distances, indices = SkLearnKDTree(search_points, metric="euclidean").query(
+        query_points, k=num_neighbours
+    )
+    return indices, distances
 
-    # # SKLearn (Compiled C++)
-    # start = time()
-    # distances, indices = KDTree(search_points, metric="euclidean").query(
-    #     query_points, num_neighbours, return_distance=True, dualtree=False
-    # )
-    # print(f"Found neighbours using KDTree in {time()-start}s")
 
-    # # Scipy (Native Python - TODO)
+def _o3d_nns(
+    search_points: npt.NDArray[np.float32],
+    query_points: npt.NDArray[np.float32],
+    num_neighbours: int,
+    max_dist: float,
+    batch_size: int,
+    **kwargs,
+) -> Tuple[npt.NDArray[np.int32], npt.NDArray[np.float32]]:
+    """
+    Run nearest neighbour search using open3d
+    """
+    nns = o3d.core.nns.NearestNeighborSearch(o3d.core.Tensor(search_points))
+    nns.hybrid_index()
+    # Construct output arrays up front (we will fill them in in chunks)
+    num_points = len(query_points)
+    # indices = np.full((num_points, num_neighbours), fill_value=-1)
+    # distances = np.full((num_points, num_neighbours), fill_value=-1)
 
-    # # Open2d (C++ with parallelism - TODO)
+    # Construct generator of chunks of query points
+    for chunk_offset in range(0, len(query_points), batch_size):
+        query_chunk = query_points[chunk_offset : chunk_offset + batch_size, :]
+        chunk_indices, chunk_distances, _ = nns.hybrid_search(
+            query_chunk, radius=max_dist, max_knn=num_neighbours
+        )
+        # indices[chunk_offset : chunk_offset + batch_size] = chunk_indices
+        # distances[chunk_offset : chunk_offset + batch_size] = chunk_distances
 
-    # return 0
+    # return indices, distances
+    return None, None
+
+
+def _oxvox_nns(
+    search_points: npt.NDArray[np.float32],
+    query_points: npt.NDArray[np.float32],
+    num_neighbours: int,
+    max_dist: float,
+    voxel_size: float,
+    **kwargs,
+) -> Tuple[npt.NDArray[np.int32], npt.NDArray[np.float32]]:
+    """
+    Run nearest neighbour search using OxVoxNNS
+    """
+    nns = OxVoxNNS(search_points, max_dist, voxel_size)
+    return nns.find_neighbours(query_points, num_neighbours)
+
+
+def _sklearn_nns_multiproc(
+    search_points: npt.NDArray[np.float32],
+    query_points: npt.NDArray[np.float32],
+    num_neighbours: int,
+    batch_size: int,
+    **kwargs,
+) -> Tuple[npt.NDArray[np.int32], npt.NDArray[np.float32]]:
+    """
+    Run nearest neighbour search using sklearn (multiprocessed)
+    """
+    # Construct tree with search points
+    tree = SkLearnKDTree(search_points, metric="euclidean")
+
+    # Construct output arrays up front (we will fill them in in chunks)
+    num_points = len(query_points)
+    indices = np.full((num_points, num_neighbours), fill_value=-1)
+    distances = np.full((num_points, num_neighbours), fill_value=-1)
+
+    # Construct generator of chunks of query points
+    query_chunk_offsets = range(0, len(query_points), batch_size)
+    query_chunks = (query_points[i : i + batch_size, :] for i in query_chunk_offsets)
+
+    # Map query across chunks of query points
+    processed_chunks = p_imap(
+        lambda query_chunk: tree.query(query_chunk, k=num_neighbours),
+        query_chunks,
+        tqdm=partial(tqdm.tqdm, disable=True),  # Disable tqdm bar
+    )
+
+    # Insert values back into output array
+    for (chunk_indices, chunk_distances), chunk_offset in zip(
+        processed_chunks, query_chunk_offsets
+    ):
+        indices[chunk_offset : chunk_offset + batch_size] = chunk_indices
+        distances[chunk_offset : chunk_offset + batch_size] = chunk_distances
+
+    return indices, distances
+
+
+def _oxvox_nns_multiproc(
+    search_points: npt.NDArray[np.float32],
+    query_points: npt.NDArray[np.float32],
+    num_neighbours: int,
+    max_dist: float,
+    batch_size: int,
+    voxel_size: float,
+) -> Tuple[npt.NDArray[np.int32], npt.NDArray[np.float32]]:
+    """
+    Run nearest neighbour search using sklearn (multiprocessed)
+    """
+    # Construct OxVoxNNS object with search points
+    nns = OxVoxNNS(search_points, max_dist, voxel_size)
+
+    # Construct output arrays up front (we will fill them in in chunks)
+    num_points = len(query_points)
+    indices = np.full((num_points, num_neighbours), fill_value=-1)
+    distances = np.full((num_points, num_neighbours), fill_value=-1)
+
+    # Construct generator of chunks of query points
+    query_chunk_offsets = range(0, len(query_points), batch_size)
+    query_chunks = (query_points[i : i + batch_size, :] for i in query_chunk_offsets)
+
+    # Map query across chunks of query points
+    processed_chunks = p_imap(
+        lambda query_chunk: nns.find_neighbours(query_chunk, num_neighbours),
+        query_chunks,
+        tqdm=partial(tqdm.tqdm, disable=True),  # Disable tqdm bar
+    )
+
+    # Insert values back into output array
+    for (chunk_indices, chunk_distances), chunk_offset in zip(
+        processed_chunks, query_chunk_offsets
+    ):
+        indices[chunk_offset : chunk_offset + batch_size] = chunk_indices
+        distances[chunk_offset : chunk_offset + batch_size] = chunk_distances
+
+    return indices, distances
 
 
 if __name__ == "__main__":
-    sys.exit(compare_performance_find_neighbours(test_data=TEST_ARRAY))
+    sys.exit(compare_performance())

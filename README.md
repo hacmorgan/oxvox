@@ -1,4 +1,8 @@
 # OxVoxNNS - Oxidised Voxelised Nearest Neighbour Search
+
+[![PyPI](https://img.shields.io/pypi/v/cibuildwheel.svg)](https://pypi.org/project/ox-vox-nns/)
+[![Actions Status](https://github.com/hacmorgan/OxVoxNNS/workflows/CI/badge.svg)](https://github.com/hacmorgan/OxVoxNNS/actions)
+
 A hybrid-ish nearest neighbour search implemented in rust, tailored towards consistent performance, especially on difficult inputs
 
 
@@ -10,6 +14,19 @@ Inexact mode is the bread and butter of this module. Instead of finding the `k` 
 
 ### Exact Mode
 Exact Mode behaves like a conventional *nearest* neighbour search, with decent performance in many situations, though typically worse than open3d's highly performant NearestNeighbourSearch
+
+
+# Installation
+## Precompiled (from PyPI, recommended)
+```
+pip install ox_vox_nns
+```
+
+## Manual
+Checkout this repo and enter a virtual environment, then run
+```
+maturin develop --release
+```
 
 
 # Usage
@@ -45,18 +62,6 @@ for query_points_chunk in query_points_chunks:
     )
 ```
 
-# Installation
-## Precompiled (from PyPI)
-Currently only available for linux x86-64
-```
-pip install ox_vox_nns
-```
-
-## Manual
-Checkout this repo and enter a virtual environment, then run
-```
-maturin develop --release
-```
 
 # Performance
 See `performance_test_ox_vox_nns.py` for test code.

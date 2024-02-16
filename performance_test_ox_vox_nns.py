@@ -38,7 +38,7 @@ from abyss.bedrock.io.convenience import easy_load
 
 SEARCH_POINTS_IRL = rf.structured_to_unstructured(
     easy_load("/home/hmo/tmp/DEEPL-1947/4.bin")[["x", "y", "z"]]
-).astype(np.float32)[::4][:100000]
+).astype(np.float32)[::4]
 SEARCH_POINTS_1M_UNIFORM = np.random.random((16_000_000, 3)).astype(np.float32) * 15
 SEARCH_POINTS_1M_CLUSTERS = np.vstack(
     [
@@ -95,11 +95,11 @@ def compare_performance() -> int:
             # "sklearn": _sklearn_nns,
             "oxvox": _oxvox_nns,
             "open3d": _o3d_nns,
-            "sklearn-multiproc": _sklearn_nns_multiproc,
-            "oxvox-multiproc": _oxvox_nns_multiproc,
+            # "sklearn-multiproc": _sklearn_nns_multiproc,
+            # "oxvox-multiproc": _oxvox_nns_multiproc,
         }.items():
 
-            sys.stdout.write(
+            print(
                 f"Searching for nearest neighbours in dataset {data_name} using algorithm: {algo_name}... "
             )
             sys.stdout.flush()
@@ -186,14 +186,13 @@ def _oxvox_nns(
     query_points: npt.NDArray[np.float32],
     num_neighbours: int,
     max_dist: float,
-    voxel_size: float,
     **kwargs,
 ) -> Tuple[npt.NDArray[np.int32], npt.NDArray[np.float32]]:
     """
     Run nearest neighbour search using OxVoxNNS
     """
-    nns = OxVoxNNS(search_points, max_dist, voxel_size)
-    return nns.find_neighbours(query_points, num_neighbours)
+    nns = OxVoxNNS(search_points, max_dist)
+    return nns.find_neighbours(query_points, num_neighbours, False)
 
 
 def _sklearn_nns_multiproc(

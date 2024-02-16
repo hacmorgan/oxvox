@@ -118,14 +118,8 @@ def test_find_neighbours() -> None:
     max_dist = 4.0
     voxel_size = 0.3
 
-    nns = ox_vox_nns.OxVoxNNS(search_points, max_dist, voxel_size)
-    indices, distances = nns.find_neighbours(
-        query_points,
-        num_neighbours,
-    )
-    
+    nns = ox_vox_nns.OxVoxNNS(search_points, max_dist)
+    indices, distances = nns.find_neighbours(query_points, num_neighbours, True)
+
     assert np.all(indices == [0, 1, 2])
     assert np.allclose(distances, [0.0, 0.173, 3.410], atol=0.001)
-    
-    
-

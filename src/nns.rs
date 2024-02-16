@@ -22,16 +22,11 @@ pub fn initialise_nns(
 ) -> (
     HashMap<(i32, i32, i32), Vec<i32>>,
     Array2<i32>,
-    Array2<f32>,
-    Array2<f32>,
 ) {
-    // 1st pass: Compute bounding box and triangulation points
-    let triangulation_points = _compute_triangulation_points(&search_points);
-
     // 2nd pass: Construct points_by_voxel mapping and compute distance from triagulation
     // points for each search point
-    let (points_by_voxel, triangulation_distances) =
-        _group_by_voxel_and_triangulate(&search_points, max_dist, &triangulation_points);
+    let points_by_voxel =
+        _group_by_voxel(&search_points, max_dist);
 
     // Compute voxel offsets for local field of voxels
     let voxel_offsets = _compute_voxel_offsets();
@@ -39,8 +34,6 @@ pub fn initialise_nns(
     (
         points_by_voxel,
         voxel_offsets,
-        triangulation_points,
-        triangulation_distances,
     )
 }
 
@@ -63,8 +56,6 @@ pub fn find_neighbours(
     num_neighbours: i32,
     max_dist: f32,
     exact: bool,
-    triangulation_points: &ArrayView2<f32>,
-    triangulation_distances: &ArrayView2<f32>,
 ) -> (Array2<i32>, Array2<f32>) {
     // Compute useful metadata
     let num_query_points = query_points.shape()[0];
@@ -92,8 +83,6 @@ pub fn find_neighbours(
                 num_neighbours,
                 max_dist,
                 exact,
-                triangulation_points,
-                triangulation_distances,
             );
         });
 
@@ -130,8 +119,6 @@ fn _find_query_point_neighbours(
     num_neighbours: i32,
     max_dist: f32,
     exact: bool,
-    triangulation_points: &ArrayView2<f32>,
-    triangulation_distances: &ArrayView2<f32>,
 ) {
     // Define volumetric ratio of 3 unit sided cube to unit sphere, to predict how many
     // neighbouring points within 3x3 voxel cube lie within search radius
@@ -144,17 +131,13 @@ fn _find_query_point_neighbours(
         voxel_coord(query_point[2], max_dist),
     );
 
-    // Find distances to triangulation points
-    let (d_a, d_b, d_c): (f32, f32, f32) = (
-        compute_l2_distance(query_point, triangulation_points.row(0)),
-        compute_l2_distance(query_point, triangulation_points.row(1)),
-        compute_l2_distance(query_point, triangulation_points.row(2)),
-    );
-
     // If not using EXACT mode algorithm, and enough points are present in local field,
     // find a suitable n such that only taking every n-th point will still very likely
     // find enough search points
-    let step_size = if !exact {
+    let mut relevant_neighbour_indices: Vec<i32> = Vec::new();
+    let step_size = if exact {
+        1
+    } else {
         let mut num_points: usize = 0;
         for voxel_offset in voxel_offsets.rows() {
             let this_voxel = (
@@ -163,44 +146,13 @@ fn _find_query_point_neighbours(
                 query_voxel.2 + voxel_offset[2],
             );
             if let Some(voxel_point_indices) = points_by_voxel.get(&this_voxel) {
-                num_points += voxel_point_indices.len()
+                relevant_neighbour_indices.extend(voxel_point_indices);
             }
         }
-        (((num_points as f32 / vox_to_sphere_ratio) / num_neighbours as f32) as usize).max(1)
-    } else {
-        1
+        (((relevant_neighbour_indices.len() as f32 / vox_to_sphere_ratio) / num_neighbours as f32)
+            as usize)
+            .max(1)
     };
-
-    // Use triangulation points to find a subset of neighbours that are likely within range
-    let mut relevant_neighbour_indices: Vec<i32> = Vec::new();
-    for voxel_offset in voxel_offsets.rows() {
-        // Construct voxel coords tuple for this voxel
-        let this_voxel = (
-            query_voxel.0 + voxel_offset[0],
-            query_voxel.1 + voxel_offset[1],
-            query_voxel.2 + voxel_offset[2],
-        );
-
-        // Only proceed if this voxel actually contains any points
-        let this_voxel_point_indices = match points_by_voxel.get(&this_voxel) {
-            Some(o) => o,
-            None => continue,
-        };
-
-        // Filter out
-        for point_idx in this_voxel_point_indices
-            .iter()
-            .step_by(step_size)
-            .filter(|&i| {
-                let idx = *i as usize;
-                (triangulation_distances[[idx, 0]] - d_a).abs() < max_dist
-                    && (triangulation_distances[[idx, 1]] - d_b).abs() < max_dist
-                    && (triangulation_distances[[idx, 2]] - d_c).abs() < max_dist
-            })
-        {
-            relevant_neighbour_indices.push(*point_idx);
-        }
-    }
 
     // When using exact algo, sort all neighbours
     if exact {
@@ -295,17 +247,15 @@ fn _compute_triangulation_points(search_points: &ArrayView2<f32>) -> Array2<f32>
 /// While we're here, we compute distances to the triangulation points
 ///
 /// This is the second pass through the points we will make
-fn _group_by_voxel_and_triangulate(
+fn _group_by_voxel(
     search_points: &ArrayView2<f32>,
     voxel_size: f32,
-    triangulation_points: &Array2<f32>,
-) -> (HashMap<(i32, i32, i32), Vec<i32>>, Array2<f32>) {
+) -> HashMap<(i32, i32, i32), Vec<i32>> {
     // Construct mapping from voxel coords to point indices
     let mut points_by_voxel = HashMap::new();
 
     // Construct an array to store each point's voxel coords
     let num_points = search_points.shape()[0];
-    let mut triangulation_distances: Array2<f32> = Array2::zeros([num_points, 3]);
 
     // Compute voxel index for each point and add to hashmap
     for i in 0..num_points {
@@ -318,20 +268,10 @@ fn _group_by_voxel_and_triangulate(
         let point_indices: &mut Vec<i32> =
             points_by_voxel.entry(voxel_coords).or_insert(Vec::new());
         point_indices.push(i as i32);
-
-        // Compute distances to triangulation points
-        for j in 0..3 {
-            triangulation_distances[[i, j]] = {
-                let dx = triangulation_points[[j, 0]] - search_points[[i, 0]];
-                let dy = triangulation_points[[j, 1]] - search_points[[i, 1]];
-                let dz = triangulation_points[[j, 2]] - search_points[[i, 2]];
-                (dx * dx + dy * dy + dz * dz).sqrt()
-            }
-        }
     }
 
     // Return the voxel indices array and the hashmap
-    (points_by_voxel, triangulation_distances)
+    points_by_voxel
 }
 
 /// Construct array to generate relatie voxel coordinates (i.e. offsets) of neighbouring voxels

@@ -16,8 +16,6 @@ struct OxVoxNNS {
     points_by_voxel: HashMap<(i32, i32, i32), Vec<i32>>, // voxel_coords -> search point indices
     voxel_offsets: Array2<i32>,                          // (9, 3)
     max_dist: f32,
-    triangulation_points: Array2<f32>,    // (3, 3)
-    triangulation_distances: Array2<f32>, // (N, 3)
 }
 
 #[pymethods]
@@ -33,7 +31,7 @@ impl OxVoxNNS {
         let search_points = search_points.as_array().to_owned();
 
         // Perform initial passes (one-time stuff)
-        let (points_by_voxel, voxel_offsets, triangulation_points, triangulation_distances) =
+        let (points_by_voxel, voxel_offsets) =
             nns::initialise_nns(search_points.view(), max_dist);
 
         // Construct the NNS object with computed values required for querying
@@ -42,8 +40,6 @@ impl OxVoxNNS {
             points_by_voxel,
             voxel_offsets,
             max_dist,
-            triangulation_points,
-            triangulation_distances,
         }
     }
 
@@ -75,8 +71,6 @@ impl OxVoxNNS {
             num_neighbours,
             self.max_dist,
             exact,
-            &self.triangulation_points.view(),
-            &self.triangulation_distances.view(),
         );
 
         (indices.into_pyarray(py), distances.into_pyarray(py))

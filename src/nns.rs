@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::vec;
 
-use indicatif::ProgressIterator;
+use indicatif::ParallelProgressIterator;
 use ndarray::array;
 use numpy::ndarray::{Array2, ArrayView1, ArrayView2, ArrayViewMut1, Axis};
+use ndarray::parallel::prelude::*;
 
 /// Perform initial passes over search points, preparing data structures for querying
 ///
@@ -58,7 +59,7 @@ pub fn find_neighbours(
     exact: bool,
 ) -> (Array2<i32>, Array2<f32>) {
     // Compute useful metadata
-    let num_query_points = query_points.shape()[0];
+    let num_query_points = query_points.nrows();
 
     // Construct output arrays, initialised with -1s
     let mut indices: Array2<i32> = Array2::zeros([num_query_points, num_neighbours as usize]) - 1;
@@ -69,6 +70,7 @@ pub fn find_neighbours(
     // points, indices, and distances arrays
     query_points
         .axis_iter(Axis(0))
+        .into_par_iter()
         .zip(indices.axis_iter_mut(Axis(0)))
         .zip(distances.axis_iter_mut(Axis(0)))
         .progress_count(num_query_points as u64)
@@ -164,6 +166,7 @@ fn _find_query_point_neighbours(
                 neighbours.push((*search_point_idx, distance));
             }
         }
+        
         // Sort the remaining points and take as many of the closest as required
         neighbours.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         for (j, (point_idx, distance)) in
@@ -179,6 +182,7 @@ fn _find_query_point_neighbours(
         for search_point_idx in relevant_neighbour_indices.iter().step_by(step_size) {
             let distance =
                 compute_l2_distance(query_point, search_points.row(*search_point_idx as usize));
+
 
             // Add to output array if passes L2 criteria
             if distance < max_dist {

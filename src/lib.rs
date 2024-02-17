@@ -12,12 +12,8 @@ mod nns;
 #[derive(Serialize, Deserialize)]
 #[pyclass(module = "ox_vox_nns")] // required for python to serialise correctly
 struct OxVoxNNS {
-    search_points: Array2<f32>,                          // (N, 3)
-    points_by_voxel: HashMap<(i32, i32, i32), Vec<i32>>, // voxel_coords -> search point indices
-    voxel_offsets: Array2<i32>,                          // (9, 3)
-    max_dist: f32,
-    triangulation_points: Array2<f32>,    // (3, 3)
-    triangulation_distances: Array2<f32>, // (N, 3)
+    search_points: Array2<f32>, // (N, 3)
+    sorted_indices: nns::SortedIndices,
 }
 
 #[pymethods]
@@ -28,22 +24,18 @@ impl OxVoxNNS {
     ///     search_points: Points to search for neighbours amongst
     ///     max_dist: Maximum distance to neighbouring point for it to be considered
     #[new]
-    fn new(search_points: PyReadonlyArray2<f32>, max_dist: f32) -> Self {
+    fn new(search_points: PyReadonlyArray2<f32>) -> Self {
         // Convert search points to rust ndarray
+        // TODO: check if we can get rid of the .to_owned without breaking pickleabaility (test in python)
         let search_points = search_points.as_array().to_owned();
 
         // Perform initial passes (one-time stuff)
-        let (points_by_voxel, voxel_offsets, triangulation_points, triangulation_distances) =
-            nns::initialise_nns(search_points.view(), max_dist);
+        let sorted_indices = nns::initialise_nns(search_points.view());
 
         // Construct the NNS object with computed values required for querying
         OxVoxNNS {
             search_points,
-            points_by_voxel,
-            voxel_offsets,
-            max_dist,
-            triangulation_points,
-            triangulation_distances,
+            sorted_indices,
         }
     }
 
@@ -61,7 +53,7 @@ impl OxVoxNNS {
         py: Python<'py>,
         query_points: PyReadonlyArray2<'py, f32>,
         num_neighbours: i32,
-        exact: bool,
+        max_dist: f32,
     ) -> (&'py PyArray2<i32>, &'py PyArray2<f32>) {
         // Convert query points to rust ndarray
         let query_points = query_points.as_array();
@@ -70,13 +62,9 @@ impl OxVoxNNS {
         let (indices, distances) = nns::find_neighbours(
             query_points,
             &self.search_points,
-            &self.points_by_voxel,
-            &self.voxel_offsets,
             num_neighbours,
-            self.max_dist,
-            exact,
-            &self.triangulation_points.view(),
-            &self.triangulation_distances.view(),
+            max_dist,
+            &self.sorted_indices,
         );
 
         (indices.into_pyarray(py), distances.into_pyarray(py))
@@ -94,8 +82,8 @@ impl OxVoxNNS {
     }
 
     /// How to construct a new OxVoxNNS object from an existing one (needed for pickling)
-    pub fn __getnewargs__<'py>(&self, py: Python<'py>) -> (&'py PyArray2<f32>, f32) {
-        (&self.search_points.clone().into_pyarray(py), self.max_dist)
+    pub fn __getnewargs__<'py>(&self, py: Python<'py>) -> &'py PyArray2<f32> {
+        &self.search_points.clone().into_pyarray(py)
     }
 }
 

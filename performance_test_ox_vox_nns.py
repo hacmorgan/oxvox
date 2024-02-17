@@ -39,11 +39,11 @@ from abyss.bedrock.io.convenience import easy_load
 SEARCH_POINTS_IRL = rf.structured_to_unstructured(
     easy_load("/home/hmo/tmp/DEEPL-1947/4.bin")[["x", "y", "z"]]
 ).astype(np.float32)[::4]
-SEARCH_POINTS_1M_UNIFORM = np.random.random((16_000_000, 3)).astype(np.float32) * 15
+SEARCH_POINTS_1M_UNIFORM = np.random.random((1_000_000, 3)).astype(np.float32) * 15
 SEARCH_POINTS_1M_CLUSTERS = np.vstack(
     [
         # Generate a cluster of random points
-        np.random.random((1_600_000, 3)).astype(np.float32)
+        np.random.random((200_000, 3)).astype(np.float32)
         # Move cluster somewhere randomly
         + np.random.random((1, 3)).astype(np.float32) * 15
     ]
@@ -52,30 +52,27 @@ SEARCH_POINTS_1M_CLUSTERS = np.vstack(
 
 
 TEST_INPUTS = {
+    # "1m-clusters": {
+    #     "search_points": SEARCH_POINTS_1M_CLUSTERS,
+    #     "query_points": SEARCH_POINTS_1M_CLUSTERS,
+    #     "num_neighbours": 800,
+    #     "max_dist": 0.05,
+    #     "voxel_size": 0.05,
+    # },
     "irl": {
         "search_points": SEARCH_POINTS_IRL,
         "query_points": SEARCH_POINTS_IRL,
         "num_neighbours": 800,
         "max_dist": 0.05,
         "voxel_size": 0.05,
-        "batch_size": 40_000,
     },
-    "1m-uniform": {
-        "search_points": SEARCH_POINTS_1M_UNIFORM,
-        "query_points": SEARCH_POINTS_1M_UNIFORM,
-        "num_neighbours": 800,
-        "max_dist": 0.05,
-        "voxel_size": 0.1,
-        "batch_size": 40_000,
-    },
-    "1m-clusters": {
-        "search_points": SEARCH_POINTS_1M_CLUSTERS,
-        "query_points": SEARCH_POINTS_1M_CLUSTERS,
-        "num_neighbours": 800,
-        "max_dist": 0.05,
-        "voxel_size": 0.05,
-        "batch_size": 40_000,
-    },
+    #     "1m-uniform": {
+    #         "search_points": SEARCH_POINTS_1M_UNIFORM,
+    #         "query_points": SEARCH_POINTS_1M_UNIFORM,
+    #         "num_neighbours": 800,
+    #         "max_dist": 0.05,
+    #         "voxel_size": 0.1,
+    #     },
 }
 
 
@@ -91,10 +88,10 @@ def compare_performance() -> int:
         results[data_name] = {}
 
         for algo_name, algo in {
-            # "scipy": _scipy_nns,
-            # "sklearn": _sklearn_nns,
             "oxvox": _oxvox_nns,
             "open3d": _o3d_nns,
+            # "scipy": _scipy_nns,
+            # "sklearn": _sklearn_nns,
             # "sklearn-multiproc": _sklearn_nns_multiproc,
             # "oxvox-multiproc": _oxvox_nns_multiproc,
         }.items():
@@ -155,7 +152,6 @@ def _o3d_nns(
     query_points: npt.NDArray[np.float32],
     num_neighbours: int,
     max_dist: float,
-    batch_size: int,
     **kwargs,
 ) -> Tuple[npt.NDArray[np.int32], npt.NDArray[np.float32]]:
     """
@@ -163,22 +159,17 @@ def _o3d_nns(
     """
     nns = o3d.core.nns.NearestNeighborSearch(o3d.core.Tensor(search_points))
     nns.hybrid_index()
-    # Construct output arrays up front (we will fill them in in chunks)
-    num_points = len(query_points)
-    # indices = np.full((num_points, num_neighbours), fill_value=-1)
-    # distances = np.full((num_points, num_neighbours), fill_value=-1)
+    indices, distances, _ = nns.hybrid_search(
+        query_points, radius=max_dist, max_knn=num_neighbours
+    )
+    return indices, distances
 
-    # Construct generator of chunks of query points
-    for chunk_offset in range(0, len(query_points), batch_size):
-        query_chunk = query_points[chunk_offset : chunk_offset + batch_size, :]
-        chunk_indices, chunk_distances, _ = nns.hybrid_search(
-            query_chunk, radius=max_dist, max_knn=num_neighbours
-        )
-        # indices[chunk_offset : chunk_offset + batch_size] = chunk_indices
-        # distances[chunk_offset : chunk_offset + batch_size] = chunk_distances
-
-    # return indices, distances
-    return None, None
+    # for chunk_offset in range(0, len(query_points), batch_size):
+    #     query_chunk = query_points[chunk_offset : chunk_offset + batch_size, :]
+    #     chunk_indices, chunk_distances, _ = nns.hybrid_search(
+    #         query_chunk, radius=max_dist, max_knn=num_neighbours
+    #     )
+    # return None, None
 
 
 def _oxvox_nns(
@@ -191,8 +182,8 @@ def _oxvox_nns(
     """
     Run nearest neighbour search using OxVoxNNS
     """
-    nns = OxVoxNNS(search_points, max_dist)
-    return nns.find_neighbours(query_points, num_neighbours, False)
+    nns = OxVoxNNS(search_points)
+    return nns.find_neighbours(query_points, num_neighbours, max_dist)
 
 
 def _sklearn_nns_multiproc(

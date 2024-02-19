@@ -39,11 +39,11 @@ from abyss.bedrock.io.convenience import easy_load
 SEARCH_POINTS_IRL = rf.structured_to_unstructured(
     easy_load("/home/hmo/tmp/DEEPL-1947/4.bin")[["x", "y", "z"]]
 ).astype(np.float32)[::4]
-SEARCH_POINTS_1M_UNIFORM = np.random.random((16_000_000, 3)).astype(np.float32) * 15
+SEARCH_POINTS_1M_UNIFORM = np.random.random((4_000_000, 3)).astype(np.float32) * 15
 SEARCH_POINTS_1M_CLUSTERS = np.vstack(
     [
         # Generate a cluster of random points
-        np.random.random((1_600_000, 3)).astype(np.float32)
+        np.random.random((400_000, 3)).astype(np.float32) * 0.5
         # Move cluster somewhere randomly
         + np.random.random((1, 3)).astype(np.float32) * 15
     ]
@@ -52,30 +52,31 @@ SEARCH_POINTS_1M_CLUSTERS = np.vstack(
 
 
 TEST_INPUTS = {
-    "irl": {
-        "search_points": SEARCH_POINTS_IRL,
-        "query_points": SEARCH_POINTS_IRL,
-        "num_neighbours": 800,
-        "max_dist": 0.05,
-        "voxel_size": 0.05,
-        "batch_size": 40_000,
-    },
-    "1m-uniform": {
-        "search_points": SEARCH_POINTS_1M_UNIFORM,
-        "query_points": SEARCH_POINTS_1M_UNIFORM,
-        "num_neighbours": 800,
-        "max_dist": 0.05,
-        "voxel_size": 0.1,
-        "batch_size": 40_000,
-    },
-    "1m-clusters": {
+    # "4m-uniform": {
+    #     "search_points": SEARCH_POINTS_1M_UNIFORM,
+    #     "query_points": SEARCH_POINTS_1M_UNIFORM,
+    #     "num_neighbours": 800,
+    #     "max_dist": 0.05,
+    #     "voxel_size": 0.1,
+    #     "batch_size": 40_000,
+    # },
+    "4m-clusters": {
         "search_points": SEARCH_POINTS_1M_CLUSTERS,
         "query_points": SEARCH_POINTS_1M_CLUSTERS,
-        "num_neighbours": 800,
+        # "num_neighbours": 800,
+        "num_neighbours": 8,
         "max_dist": 0.05,
         "voxel_size": 0.05,
         "batch_size": 40_000,
     },
+    # "irl": {
+    #     "search_points": SEARCH_POINTS_IRL,
+    #     "query_points": SEARCH_POINTS_IRL,
+    #     "num_neighbours": 800,
+    #     "max_dist": 0.05,
+    #     "voxel_size": 0.05,
+    #     "batch_size": 40_000,
+    # },
 }
 
 
@@ -191,8 +192,12 @@ def _oxvox_nns(
     """
     Run nearest neighbour search using OxVoxNNS
     """
+    start = time()
     nns = OxVoxNNS(search_points, max_dist)
-    return nns.find_neighbours(query_points, num_neighbours, False)
+    print(f"Constructed NNS searcher in {time() -start}s")
+    # return nns.find_neighbours(query_points, num_neighbours, False)
+    return nns.find_neighbours(query_points, num_neighbours, True)
+    # return nns.find_neighbours(search_points, query_points, num_neighbours, False)
 
 
 def _sklearn_nns_multiproc(
@@ -243,7 +248,7 @@ def _oxvox_nns_multiproc(
     voxel_size: float,
 ) -> Tuple[npt.NDArray[np.int32], npt.NDArray[np.float32]]:
     """
-    Run nearest neighbour search using sklearn (multiprocessed)
+    Run nearest neighbour search using OxVox with Python multiprocessing
     """
     # Construct OxVoxNNS object with search points
     nns = OxVoxNNS(search_points, max_dist, voxel_size)

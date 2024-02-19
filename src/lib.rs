@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use bincode::{deserialize, serialize};
-use numpy::ndarray::Array2;
+use ndarray::{Array2, ArrayView2};
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
 use pyo3::types::{PyBytes, PyModule};
 use pyo3::{pyclass, pymethods, pymodule, PyResult, Python};
@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 mod nns;
 
-#[derive(Serialize, Deserialize)]
-#[pyclass(module = "ox_vox_nns")] // required for python to serialise correctly
+// #[derive(Serialize, Deserialize)]
+#[pyclass(module = "ox_vox_nns")] // module = "blah" required for python to serialise correctly
 struct OxVoxNNS {
     search_points: Array2<f32>,                          // (N, 3)
     points_by_voxel: HashMap<(i32, i32, i32), Vec<i32>>, // voxel_coords -> search point indices
@@ -31,8 +31,7 @@ impl OxVoxNNS {
         let search_points = search_points.as_array().to_owned();
 
         // Perform initial passes (one-time stuff)
-        let (points_by_voxel, voxel_offsets) =
-            nns::initialise_nns(search_points.view(), max_dist);
+        let (points_by_voxel, voxel_offsets) = nns::initialise_nns(&search_points, max_dist);
 
         // Construct the NNS object with computed values required for querying
         OxVoxNNS {
@@ -76,21 +75,21 @@ impl OxVoxNNS {
         (indices.into_pyarray(py), distances.into_pyarray(py))
     }
 
-    /// Implement deserialisation (unpickling) for OxVoxNNS objects
-    pub fn __setstate__(&mut self, state: &PyBytes) -> PyResult<()> {
-        *self = deserialize(state.as_bytes()).unwrap();
-        Ok(())
-    }
+    // /// Implement deserialisation (unpickling) for OxVoxNNS objects
+    // pub fn __setstate__(&mut self, state: &PyBytes) -> PyResult<()> {
+    //     *self = deserialize(state.as_bytes()).unwrap();
+    //     Ok(())
+    // }
 
-    /// Implement serialisation (pickling) for OxVoxNNS objects
-    pub fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<&'py PyBytes> {
-        Ok(PyBytes::new(py, &serialize(&self).unwrap()))
-    }
+    // /// Implement serialisation (pickling) for OxVoxNNS objects
+    // pub fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<&'py PyBytes> {
+    //     Ok(PyBytes::new(py, &serialize(&self).unwrap()))
+    // }
 
-    /// How to construct a new OxVoxNNS object from an existing one (needed for pickling)
-    pub fn __getnewargs__<'py>(&self, py: Python<'py>) -> (&'py PyArray2<f32>, f32) {
-        (&self.search_points.clone().into_pyarray(py), self.max_dist)
-    }
+    // /// How to construct a new OxVoxNNS object from an existing one (needed for pickling)
+    // pub fn __getnewargs__<'py>(&self, py: Python<'py>) -> (&'py PyArray2<f32>, f32) {
+    //     (&self.search_points.clone().into_pyarray(py), self.max_dist)
+    // }
 }
 
 #[pymodule]

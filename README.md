@@ -3,10 +3,10 @@
 [![PyPI](https://img.shields.io/pypi/v/cibuildwheel.svg)](https://pypi.org/project/ox-vox-nns/)
 [![Actions Status](https://github.com/hacmorgan/OxVoxNNS/workflows/CI/badge.svg)](https://github.com/hacmorgan/OxVoxNNS/actions)
 
-A hybrid-ish nearest neighbour search implemented in rust, tailored towards consistent performance, especially on difficult inputs
+A hybrid-ish nearest neighbour search implemented in rust, tailored towards consistent performance, especially on difficult inputs for KDTrees
 
 
-# Okay but why?
+## Okay but why?
 Suppose we are searching for `k` neighbours within radius `r`, OxVox can operate in two different modes depending on desired behaviour and performance (see *Performance* section below).
 
 ### Inexact Mode (OxVoxApprox)
@@ -16,20 +16,20 @@ Inexact mode is the bread and butter of this module. Instead of finding the `k` 
 Exact Mode behaves like a conventional *nearest* neighbour search, with decent performance in many situations, though typically worse than open3d's highly performant NearestNeighbourSearch
 
 
-# Installation
-## Precompiled (from PyPI, recommended)
+## Installation
+### Precompiled (from PyPI, recommended)
 ```
 pip install ox_vox_nns
 ```
 
-## Manual
+### Manual
 Checkout this repo and enter a virtual environment, then run
 ```
 maturin develop --release
 ```
 
 
-# Usage
+## Usage
 Basic usage, query a block of query points in *inexact* mode:
 ```
 from ox_vox_nns.ox_vox_nns import OxVoxNNS
@@ -63,7 +63,9 @@ for query_points_chunk in query_points_chunks:
 ```
 
 
-# Performance
+## Performance
 See `performance_test_ox_vox_nns.py` for test code.
 
-Rough testing suggests that OxVoxNNS outperforms KDTrees under certain circumstances, particularly with higher numbers of query points. Rigourous testing is a WIP
+More rigourous testing is still TODO but will be required in order to construct a rubric for users to gauge more reliably whether OxVox will help them or not.
+
+Rough testing suggests that OxVoxNNS outperforms KDTrees under certain circumstances, particularly with dense clusters and/or big gaps. As a rule of thumb, KDTrees will beat OxVox for more uniformally distributed pointclouds, but OxVoxApprox will win at some point as the points become more clustered and the tree search slows down more significantly

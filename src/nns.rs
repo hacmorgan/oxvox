@@ -1,8 +1,8 @@
-use std::collections::{HashMap, BinaryHeap};
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, HashMap};
 use std::vec;
-use std::cmp::{Ordering,Reverse};
 
-use indicatif::ParallelProgressIterator;
+use indicatif::{ParallelProgressIterator, ProgressIterator};
 use ndarray::array;
 use ndarray::parallel::prelude::*;
 use ndarray::{s, Array2, ArrayView1, ArrayView2, ArrayViewMut1, Axis};
@@ -16,7 +16,7 @@ struct Neighbour {
 
 impl Ord for Neighbour {
     fn cmp(&self, other: &Self) -> Ordering {
-        if self.distance< other.distance {
+        if self.distance < other.distance {
             Ordering::Less
         } else if self.distance > other.distance {
             Ordering::Greater
@@ -76,6 +76,61 @@ pub fn initialise_nns(
 /// Returns:
 ///     Indices of neighbouring points (Q, num_neighbours)
 ///     Distances of neighbouring points from query point (Q, num_neighbours)
+pub fn find_neighbours_singlethread(
+    query_points: ArrayView2<f32>,
+    search_points: &Array2<f32>,
+    points_by_voxel: &HashMap<(i32, i32, i32), Vec<i32>>,
+    voxel_offsets: &Array2<i32>,
+    num_neighbours: i32,
+    max_dist: f32,
+    epsilon: f32,
+    exact: bool,
+) -> (Array2<i32>, Array2<f32>) {
+    // Compute useful metadata
+    let num_query_points = query_points.shape()[0];
+
+    // Construct output arrays, initialised with -1s
+    let mut indices: Array2<i32> =
+        Array2::from_elem([num_query_points, num_neighbours as usize], -1i32);
+    let mut distances: Array2<f32> =
+        Array2::from_elem([num_query_points, num_neighbours as usize], -1f32);
+
+    // Map query point processing function across corresponding rows of query
+    // points, indices, and distances arrays
+    query_points
+        .axis_iter(Axis(0))
+        .zip(indices.axis_iter_mut(Axis(0)))
+        .zip(distances.axis_iter_mut(Axis(0)))
+        .progress_count(num_query_points as u64)
+        .for_each(|((query_point, indices_row), distances_row)| {
+            _find_query_point_neighbours(
+                query_point,
+                indices_row,
+                distances_row,
+                &search_points,
+                &points_by_voxel,
+                voxel_offsets,
+                num_neighbours,
+                max_dist,
+                epsilon,
+                exact,
+            );
+        });
+
+    (indices, distances)
+}
+
+/// Find the (up to) N nearest neighbours within a given radius for each query point
+///
+/// Args:
+///     search_points: Pointcloud we are searching for neighbours within (S, 3)
+///     query_points: Points we are searching for the neighbours of (Q, 3)
+///     num_neighbours: Maximum number of neighbours to search for
+///     max_dist: Furthest distance to neighbouring points before we don't care about them
+///
+/// Returns:
+///     Indices of neighbouring points (Q, num_neighbours)
+///     Distances of neighbouring points from query point (Q, num_neighbours)
 pub fn find_neighbours(
     query_points: ArrayView2<f32>,
     search_points: &Array2<f32>,
@@ -83,6 +138,7 @@ pub fn find_neighbours(
     voxel_offsets: &Array2<i32>,
     num_neighbours: i32,
     max_dist: f32,
+    epsilon: f32,
     exact: bool,
 ) -> (Array2<i32>, Array2<f32>) {
     // Compute useful metadata
@@ -112,6 +168,7 @@ pub fn find_neighbours(
                 voxel_offsets,
                 num_neighbours,
                 max_dist,
+                epsilon,
                 exact,
             );
         });
@@ -148,6 +205,7 @@ fn _find_query_point_neighbours(
     voxel_offsets: &Array2<i32>,
     num_neighbours: i32,
     max_dist: f32,
+    epsilon: f32,
     exact: bool,
 ) {
     // Compute voxel coords of query point
@@ -169,35 +227,49 @@ fn _find_query_point_neighbours(
     // If we could be stopping early, we want to make a few passes over the points to
     // help get a better distribution of the points
     let step_size = {
-        (relevant_neighbour_indices.len() * SPARSE_NUM_PASSES / (num_neighbours as usize))
-            .max(1)
+        (relevant_neighbour_indices.len() * SPARSE_NUM_PASSES / (num_neighbours as usize)).max(1)
     };
 
     // Construct an iterator of interleaved slices of points to help spread out search across multiple passes
     let neighbours_iter =
         (0..step_size).flat_map(|i| relevant_neighbour_indices.iter().skip(i).step_by(step_size));
-    let neighbours_with_distances = neighbours_iter.map(|&idx| {
-                Neighbour {
-                    search_point_idx: idx,
-                    distance: compute_l2_distance(query_point, search_points.row(idx as usize)),
-                }
-            }).filter(|neighbour| neighbour.distance < max_dist);
+    let neighbours_within_range = neighbours_iter
+        .map(|&idx| Neighbour {
+            search_point_idx: idx,
+            distance: compute_l2_distance(query_point, search_points.row(idx as usize)),
+        })
+        .filter(|neighbour| neighbour.distance < max_dist);
 
     // When using exact algo, add all neighbours to BinaryHeap and pop off K elements
     if exact {
         let mut neighbours = BinaryHeap::new();
         neighbours.reserve_exact(relevant_neighbour_indices.len());
-        for neighbour in neighbours_with_distances {
+        let mut num_neighbours_within_eps = 0;
+        for neighbour in neighbours_within_range {
+            if neighbour.distance < epsilon {
+                num_neighbours_within_eps += 1;
+            }
             neighbours.push(Reverse(neighbour));
+            if num_neighbours_within_eps >= num_neighbours {
+                break;
+            }
         }
         for i in 0..neighbours.len().min(num_neighbours as usize) {
-            let neighbour = neighbours.pop().unwrap();
-            indices_row[i] = neighbour.0.search_point_idx;
-            distances_row[i] = neighbour.0.distance;
+            if i == neighbours.len() - 1 {
+                // `peek()` the last element to save a log(neighbours.len()) lookup for the next smallest element
+                let neighbour = neighbours.peek().unwrap();
+                indices_row[i] = neighbour.0.search_point_idx;
+                distances_row[i] = neighbour.0.distance;
+            } else {
+                // `pop()` all other elements because we still need to know the next smallest element
+                let neighbour = neighbours.pop().unwrap();
+                indices_row[i] = neighbour.0.search_point_idx;
+                distances_row[i] = neighbour.0.distance;
+            };
         }
     } else {
         // If using sample/inexact algo, take points evenly distributed amongst relevant neighbours
-        for (i, neighbour) in neighbours_with_distances
+        for (i, neighbour) in neighbours_within_range
             .take(num_neighbours as usize)
             .enumerate()
         {

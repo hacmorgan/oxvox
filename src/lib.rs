@@ -57,20 +57,36 @@ impl OxVoxNNS {
         query_points: PyReadonlyArray2<'py, f32>,
         num_neighbours: i32,
         exact: bool,
+        parallel: bool,
+        epsilon: f32,
     ) -> (&'py PyArray2<i32>, &'py PyArray2<f32>) {
         // Convert query points to rust ndarray
         let query_points = query_points.as_array();
 
         // Run find_neighbours function
-        let (indices, distances) = nns::find_neighbours(
-            query_points,
-            &self.search_points,
-            &self.points_by_voxel,
-            &self.voxel_offsets,
-            num_neighbours,
-            self.max_dist,
-            exact,
-        );
+        let (indices, distances) = if parallel {
+            nns::find_neighbours(
+                query_points,
+                &self.search_points,
+                &self.points_by_voxel,
+                &self.voxel_offsets,
+                num_neighbours,
+                self.max_dist,
+                epsilon,
+                exact,
+            )
+        } else {
+            nns::find_neighbours_singlethread(
+                query_points,
+                &self.search_points,
+                &self.points_by_voxel,
+                &self.voxel_offsets,
+                num_neighbours,
+                self.max_dist,
+                epsilon,
+                exact,
+            )
+        };
 
         (indices.into_pyarray(py), distances.into_pyarray(py))
     }

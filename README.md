@@ -1,4 +1,4 @@
-# OxVoxNNS - Oxidised Voxelised Nearest Neighbour Search
+# OxVoxNNS - **Ox**idised **Vox**elised **N**earest **N**eighbour **S**earch
 
 [![PyPI](https://img.shields.io/pypi/v/cibuildwheel.svg)](https://pypi.org/project/ox-vox-nns/)
 [![Actions Status](https://github.com/hacmorgan/OxVoxNNS/workflows/CI/badge.svg)](https://github.com/hacmorgan/OxVoxNNS/actions)

@@ -1,11 +1,10 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap};
-use std::vec;
 
 use indicatif::{ParallelProgressIterator, ProgressIterator};
-use ndarray::array;
+
 use ndarray::parallel::prelude::*;
-use ndarray::{s, Array2, ArrayView1, ArrayView2, ArrayViewMut1, Axis};
+use ndarray::{Array2, ArrayView1, ArrayView2, ArrayViewMut1, Axis};
 
 const SPARSE_NUM_PASSES: usize = 3;
 
@@ -84,10 +83,14 @@ pub fn find_neighbours_singlethread(
     num_neighbours: i32,
     max_dist: f32,
     epsilon: f32,
-    exact: bool,
+    sparse: bool,
+    l2_distance: bool,
 ) -> (Array2<i32>, Array2<f32>) {
     // Compute useful metadata
     let num_query_points = query_points.shape()[0];
+
+    // Precompute query voxels
+    let query_voxels: Array2<i32> = query_points.map(|&x| (x / max_dist) as i32);
 
     // Construct output arrays, initialised with -1s
     let mut indices: Array2<i32> =
@@ -99,23 +102,28 @@ pub fn find_neighbours_singlethread(
     // points, indices, and distances arrays
     query_points
         .axis_iter(Axis(0))
+        .zip(query_voxels.axis_iter(Axis(0)))
         .zip(indices.axis_iter_mut(Axis(0)))
         .zip(distances.axis_iter_mut(Axis(0)))
         .progress_count(num_query_points as u64)
-        .for_each(|((query_point, indices_row), distances_row)| {
-            _find_query_point_neighbours(
-                query_point,
-                indices_row,
-                distances_row,
-                &search_points,
-                &points_by_voxel,
-                voxel_offsets,
-                num_neighbours,
-                max_dist,
-                epsilon,
-                exact,
-            );
-        });
+        .for_each(
+            |(((query_point, query_voxel), indices_row), distances_row)| {
+                _find_query_point_neighbours(
+                    query_point,
+                    query_voxel,
+                    indices_row,
+                    distances_row,
+                    &search_points,
+                    &points_by_voxel,
+                    voxel_offsets,
+                    num_neighbours,
+                    max_dist,
+                    epsilon,
+                    sparse,
+                    l2_distance,
+                );
+            },
+        );
 
     (indices, distances)
 }
@@ -139,12 +147,14 @@ pub fn find_neighbours(
     num_neighbours: i32,
     max_dist: f32,
     epsilon: f32,
-    exact: bool,
+    sparse: bool,
+    l2_distance: bool,
 ) -> (Array2<i32>, Array2<f32>) {
-    // Compute useful metadata
-    let num_query_points = query_points.shape()[0];
+    // Precompute query voxels
+    let query_voxels: Array2<i32> = query_points.map(|&x| (x / max_dist) as i32);
 
     // Construct output arrays, initialised with -1s
+    let num_query_points = query_points.shape()[0];
     let mut indices: Array2<i32> =
         Array2::from_elem([num_query_points, num_neighbours as usize], -1i32);
     let mut distances: Array2<f32> =
@@ -155,23 +165,28 @@ pub fn find_neighbours(
     query_points
         .axis_iter(Axis(0))
         .into_par_iter()
+        .zip(query_voxels.axis_iter(Axis(0)))
         .zip(indices.axis_iter_mut(Axis(0)))
         .zip(distances.axis_iter_mut(Axis(0)))
         .progress_count(num_query_points as u64)
-        .for_each(|((query_point, indices_row), distances_row)| {
-            _find_query_point_neighbours(
-                query_point,
-                indices_row,
-                distances_row,
-                &search_points,
-                &points_by_voxel,
-                voxel_offsets,
-                num_neighbours,
-                max_dist,
-                epsilon,
-                exact,
-            );
-        });
+        .for_each(
+            |(((query_point, query_voxel), indices_row), distances_row)| {
+                _find_query_point_neighbours(
+                    query_point,
+                    query_voxel,
+                    indices_row,
+                    distances_row,
+                    &search_points,
+                    &points_by_voxel,
+                    voxel_offsets,
+                    num_neighbours,
+                    max_dist,
+                    epsilon,
+                    sparse,
+                    l2_distance,
+                );
+            },
+        );
 
     (indices, distances)
 }
@@ -198,6 +213,7 @@ pub fn find_neighbours(
 ///     voxel_size:
 fn _find_query_point_neighbours(
     query_point: ArrayView1<f32>,
+    query_voxel: ArrayView1<i32>,
     mut indices_row: ArrayViewMut1<i32>,
     mut distances_row: ArrayViewMut1<f32>,
     search_points: &Array2<f32>,
@@ -206,20 +222,29 @@ fn _find_query_point_neighbours(
     num_neighbours: i32,
     max_dist: f32,
     epsilon: f32,
-    exact: bool,
+    sparse: bool,
+    l2_distance: bool,
 ) {
-    // Compute voxel coords of query point
-    let query_voxel = query_point.map(|&x| (x / max_dist) as i32);
-
     // Find indices of all neighbours in 3x3 local area
     let mut relevant_neighbour_indices: Vec<i32> = Vec::new();
-    for voxel_offset in voxel_offsets.axis_iter(Axis(0)) {
-        let this_voxel = (
+    let voxels_iter = voxel_offsets.axis_iter(Axis(0)).map(|voxel_offset| {
+        (
             query_voxel[0] + voxel_offset[0],
             query_voxel[1] + voxel_offset[1],
             query_voxel[2] + voxel_offset[2],
-        );
-        if let Some(voxel_point_indices) = points_by_voxel.get(&this_voxel) {
+        )
+    });
+
+    // Find how many points are within our local field
+    let mut num_points = 0;
+    for voxel in voxels_iter.clone() {
+        if let Some(voxel_point_indices) = points_by_voxel.get(&voxel) {
+            num_points += voxel_point_indices.len();
+        }
+    }
+    relevant_neighbour_indices.reserve_exact(num_points);
+    for voxel in voxels_iter {
+        if let Some(voxel_point_indices) = points_by_voxel.get(&voxel) {
             relevant_neighbour_indices.extend(voxel_point_indices);
         }
     }
@@ -236,24 +261,32 @@ fn _find_query_point_neighbours(
     let neighbours_within_range = neighbours_iter
         .map(|&idx| Neighbour {
             search_point_idx: idx,
-            distance: compute_l2_distance(query_point, search_points.row(idx as usize)),
+            distance: compute_distance(query_point, search_points.row(idx as usize), l2_distance),
         })
         .filter(|neighbour| neighbour.distance < max_dist);
 
     // When using exact algo, add all neighbours to BinaryHeap and pop off K elements
-    if exact {
+    if ! sparse {
+
+        // Construct the binary heap and reserve enough memory for all neighbours to fit
         let mut neighbours = BinaryHeap::new();
         neighbours.reserve_exact(relevant_neighbour_indices.len());
+
+        // Add all points within range to the binary heap
         let mut num_neighbours_within_eps = 0;
         for neighbour in neighbours_within_range {
             if neighbour.distance < epsilon {
                 num_neighbours_within_eps += 1;
             }
             neighbours.push(Reverse(neighbour));
+
+            // Stop early if we've found k neighbours within range eps of query point
             if num_neighbours_within_eps >= num_neighbours {
                 break;
             }
         }
+
+        // Pop as many elements as required off the heap
         for i in 0..neighbours.len().min(num_neighbours as usize) {
             if i == neighbours.len() - 1 {
                 // `peek()` the last element to save a log(neighbours.len()) lookup for the next smallest element
@@ -267,6 +300,7 @@ fn _find_query_point_neighbours(
                 distances_row[i] = neighbour.0.distance;
             };
         }
+        
     } else {
         // If using sample/inexact algo, take points evenly distributed amongst relevant neighbours
         for (i, neighbour) in neighbours_within_range
@@ -280,11 +314,15 @@ fn _find_query_point_neighbours(
 }
 
 /// Compute L2 (euclidean) distance between two points
-fn compute_l2_distance(point_a: ArrayView1<f32>, point_b: ArrayView1<f32>) -> f32 {
+fn compute_distance(point_a: ArrayView1<f32>, point_b: ArrayView1<f32>, l2_distance: bool) -> f32 {
     let dx = point_a[0] - point_b[0];
     let dy = point_a[1] - point_b[1];
     let dz = point_a[2] - point_b[2];
-    (dx * dx + dy * dy + dz * dz).sqrt()
+    if l2_distance {
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    } else {
+        dx + dy + dz
+    }
 }
 
 /// Generate voxel coordinates for each point (i.e. find which voxel each point
@@ -302,7 +340,7 @@ fn _group_by_voxel(
     let mut points_by_voxel = HashMap::new();
 
     // Construct an array to store each point's voxel coords
-    let num_points = search_points.shape()[0];
+    let _num_points = search_points.shape()[0];
 
     // Compute voxel index for each point and add to hashmap
     let voxel_indices: Array2<i32> = search_points.map(|&x| (x / voxel_size) as i32);

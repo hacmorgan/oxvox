@@ -6,16 +6,6 @@
 A hybrid-ish nearest neighbour search implemented in rust, tailored towards consistent performance, especially on difficult inputs for KDTrees
 
 
-## Okay but why?
-Suppose we are searching for `k` neighbours within radius `r`, OxVox can operate in two different modes depending on desired behaviour and performance (see *Performance* section below).
-
-### Inexact Mode (OxVoxApprox)
-Inexact mode is the bread and butter of this module. Instead of finding the `k` *nearest* neighbours, OxVoxApprox finds `k` roughly evenly distributed neighbours within radius `r`, avoiding a lot of expensive L2 distance computations and neighbour sorting.
-
-### Exact Mode
-Exact Mode behaves like a conventional *nearest* neighbour search, with decent performance in many situations, though typically worse than open3d's highly performant NearestNeighbourSearch
-
-
 ## Installation
 ### Precompiled (from PyPI, recommended)
 ```
@@ -30,42 +20,46 @@ maturin develop --release
 
 
 ## Usage
-Basic usage, query a block of query points in *inexact* mode:
+Basic usage, query a block of query points in **sparse** mode:
 ```
+import numpy as np
 from ox_vox_nns.ox_vox_nns import OxVoxNNS
 
+NUM_POINTS = 100_000
+TEST_POINTS = np.random.random((NUM_POINTS, 3))
+
 indices, distances = ox_vox_nns.OxVoxNNS(
-    search_points,   # (S, 3) ndarray
-    max_dist,        # float
+    search_points=TEST_POINTS,
+    max_dist=0.05,
 ).find_neighbours(
-    query_points,    # (Q, 3) ndarray
-    num_neighbours,  # int
-    False,           # False => inexact mode
+    query_points=TEST_POINTS,
+    num_neighbours=1000,
+    sparse=True,
 )
 ```
 
 More complex usage, using a single NNS object for multiple *exact* mode queries (e.g. to distribute the `nns` object and perform queries in parallel, or to query from a large number of query points in batches/chunks)
 ```
-from ox_vox_nns.ox_vox_nns import OxVoxNNS
+# same imports and test data as above
 
-nns = ox_vox_nns.OxVoxNNS(
-    search_points,
-    max_dist,
-    voxel_size,
-)
+nns = ox_vox_nns.OxVoxNNS(TEST_POINTS, 0.1)
 
 for query_points_chunk in query_points_chunks:
     chunk_indices, chunk_distances = nns.find_neighbours(
-        query_points,
-        num_neighbours,
-        True,
+        query_points=query_points_chunk,
+        num_neighbours=1,
+        sparse=False,
     )
 ```
 
 
 ## Performance
+As a rough heuristic:
+
+- Open3D will edge out OxVox on **easier data**, e.g. uniformally distributed points, though OxVox does outperform SciPy and SKLearn's KDTree implementations
+- OxVox in exact mode will outperform even Open3D on harder inputs, e.g. with clusters of very dense points
+- OxVox in sparse mode or with `epsilon > 0.0` will dramatically outperform KDTrees too. This is not really a fair comparison, but if you don't strictly need the exact `k` nearest neighbours it can be very helpful
+
 See `performance_test_ox_vox_nns.py` for test code.
 
-More rigourous testing is still TODO but will be required in order to construct a rubric for users to gauge more reliably whether OxVox will help them or not.
-
-Rough testing suggests that OxVoxNNS outperforms KDTrees under certain circumstances, particularly with dense clusters and/or big gaps. As a rule of thumb, KDTrees will beat OxVox for more uniformally distributed pointclouds, but OxVoxApprox will win at some point as the points become more clustered and the tree search slows down more significantly
+More thorough tests and interactive visualisations are still being developed to help a prospective user decide quickly if OxVox is worth trying

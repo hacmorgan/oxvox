@@ -11,7 +11,7 @@ mod nns;
 
 #[derive(Serialize, Deserialize)]
 #[pyclass(module = "ox_vox_nns")] // module = "blah" required for python to serialise correctly
-struct OxVoxNNS {
+struct OxVoxEngine {
     search_points: Array2<f32>,                          // (N, 3)
     points_by_voxel: HashMap<(i32, i32, i32), Vec<i32>>, // maps voxel_coords -> indices of search points in that voxel
     voxel_offsets: Array2<i32>,                          // (27, 3)
@@ -19,7 +19,7 @@ struct OxVoxNNS {
 }
 
 #[pymethods]
-impl OxVoxNNS {
+impl OxVoxEngine {
     /// Construct OxVoxNNS object
     ///
     /// Args:
@@ -34,7 +34,7 @@ impl OxVoxNNS {
         let (points_by_voxel, voxel_offsets) = nns::initialise_nns(&search_points, max_dist);
 
         // Construct the NNS object with computed values required for querying
-        OxVoxNNS {
+        OxVoxEngine {
             search_points,
             points_by_voxel,
             voxel_offsets,
@@ -120,9 +120,10 @@ impl OxVoxNNS {
 }
 
 #[pymodule]
+#[pyo3(name="_ox_vox_nns")]
 fn ox_vox_nns<'py>(_py: Python<'py>, m: &'py PyModule) -> PyResult<()> {
     // All our python interface is in the OxVoxNNS class
-    m.add_class::<OxVoxNNS>()?;
+    m.add_class::<OxVoxEngine>()?;
 
     // Return a successful PyResult if the module compiled successfully
     Ok(())

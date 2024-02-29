@@ -11,7 +11,10 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
+dependencies = ["numpy"]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
 # compatibility = "linux"  # not just GNU
+python-source = "python"
+module-name = "ox_vox_nns._ox_vox_nns"

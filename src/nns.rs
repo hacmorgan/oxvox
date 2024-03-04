@@ -54,8 +54,7 @@ pub fn initialise_nns(
     search_points: &Array2<f32>,
     max_dist: f32,
 ) -> (HashMap<(i32, i32, i32), Vec<i32>>, Array2<i32>) {
-    // 2nd pass: Construct points_by_voxel mapping and compute distance from triagulation
-    // points for each search point
+    // Group point indices by voxel into a hashmap indexed by voxel coordinates
     let points_by_voxel = _group_by_voxel(search_points, max_dist);
 
     // Compute voxel offsets for local field of voxels
@@ -255,18 +254,19 @@ fn _find_query_point_neighbours(
         (relevant_neighbour_indices.len() * SPARSE_NUM_PASSES / (num_neighbours as usize)).max(1)
     };
 
-    // Construct an iterator of interleaved slices of points to help spread out search across multiple passes
-    let neighbours_iter =
-        (0..step_size).flat_map(|i| relevant_neighbour_indices.iter().skip(i).step_by(step_size));
-    let neighbours_within_range = neighbours_iter
-        .map(|&idx| Neighbour {
-            search_point_idx: idx,
-            distance: compute_distance(query_point, search_points.row(idx as usize), l2_distance),
-        })
-        .filter(|neighbour| neighbour.distance < max_dist);
-
     // When using exact algo, add all neighbours to BinaryHeap and pop off K elements
-    if ! sparse {
+    if !sparse {
+        let neighbours_within_range = relevant_neighbour_indices
+            .iter()
+            .map(|&idx| Neighbour {
+                search_point_idx: idx,
+                distance: compute_distance(
+                    query_point,
+                    search_points.row(idx as usize),
+                    l2_distance,
+                ),
+            })
+            .filter(|neighbour| neighbour.distance < max_dist);
 
         // Construct the binary heap and reserve enough memory for all neighbours to fit
         let mut neighbours = BinaryHeap::new();
@@ -300,8 +300,20 @@ fn _find_query_point_neighbours(
                 distances_row[i] = neighbour.0.distance;
             };
         }
-        
     } else {
+        // Construct an iterator of interleaved slices of points to help spread out search across multiple passes
+        let neighbours_iter = (0..step_size)
+            .flat_map(|i| relevant_neighbour_indices.iter().skip(i).step_by(step_size));
+        let neighbours_within_range = neighbours_iter
+            .map(|&idx| Neighbour {
+                search_point_idx: idx,
+                distance: compute_distance(
+                    query_point,
+                    search_points.row(idx as usize),
+                    l2_distance,
+                ),
+            })
+            .filter(|neighbour| neighbour.distance < max_dist);
         // If using sample/inexact algo, take points evenly distributed amongst relevant neighbours
         for (i, neighbour) in neighbours_within_range
             .take(num_neighbours as usize)

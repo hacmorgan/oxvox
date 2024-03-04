@@ -66,7 +66,6 @@ impl OxVoxEngine {
 
         // Run find_neighbours function
         let (indices, distances) = if num_threads != 1 {
-
             // Set number of threads in global thread pool
             rayon::ThreadPoolBuilder::new()
                 .num_threads(num_threads)
@@ -120,7 +119,7 @@ impl OxVoxEngine {
 }
 
 #[pymodule]
-#[pyo3(name="_ox_vox_nns")]
+#[pyo3(name = "_ox_vox_nns")]
 fn ox_vox_nns<'py>(_py: Python<'py>, m: &'py PyModule) -> PyResult<()> {
     // All our python interface is in the OxVoxNNS class
     m.add_class::<OxVoxEngine>()?;

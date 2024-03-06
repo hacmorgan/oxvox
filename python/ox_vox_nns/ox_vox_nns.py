@@ -50,10 +50,9 @@ class OxVoxNNS:
         self,
         query_points: npt.NDArray[np.floating],
         num_neighbours: int,
-        sparse: bool = False,
-        l2_distance: bool = True,
         num_threads: int = 0,
-        epsilon: float = 0.0,
+        # epsilon: float = np.finfo(np.float32).eps,
+        epsilon: float = 0,
     ) -> Tuple[npt.NDArray[np.int32], npt.NDArray[np.float32]]:
         """
         Find neighbours in search points within range for all given query points
@@ -63,18 +62,12 @@ class OxVoxNNS:
                 unstructured (i.e. conventional) array with 3 columns, or as a
                 structured array with "x", "y" and "z" columns at minimum
             num_neighbours: Maximum number of neighbours to find, a.k.a. `k`
-            sparse: Return a sample of `k` neighbours roughly evenly distributed amongst
-                neighbours within range if True, return the exact `k` nearest neighbours
-                otherwise. Sparse mode may be more useful in some contexts, and saves a
-                lot of distance comparisons and sorting (i.e. time) for very dense
-                pointclouds
-            l2_distance: Use L2/euclidean distance if True, L1/Manhattan distance
-                otherwise
             num_threads: Number of parallel CPU threads to use in queries. Uses all
                 available CPUs if set to 0
             epsilon: Any neighbours within this distance of the query point are accepted
-                automatically (skips sorting). This can dramatically speed up queries in
-                pointclouds with very dense areas
+                automatically (skips sorting). Even at its default value of float32 eps
+                (0.00000012), this can help prevent the search from getting bogged down
+                in extremely dense regions
 
         Returns:
             Indices of neighbouring search points. -1 where neighbours can't be found
@@ -84,8 +77,6 @@ class OxVoxNNS:
         return self.engine.find_neighbours(
             self._sanitise_points(query_points),
             num_neighbours,
-            sparse,
-            l2_distance,
             num_threads,
             epsilon,
         )

@@ -56,8 +56,6 @@ impl OxVoxEngine {
         py: Python<'py>,
         query_points: PyReadonlyArray2<'py, f32>,
         num_neighbours: i32,
-        sparse: bool,
-        l2_distance: bool,
         num_threads: usize,
         epsilon: f32,
     ) -> (&'py PyArray2<i32>, &'py PyArray2<f32>) {
@@ -81,8 +79,6 @@ impl OxVoxEngine {
                 num_neighbours,
                 self.max_dist,
                 epsilon,
-                sparse,
-                l2_distance,
             )
         } else {
             nns::find_neighbours_singlethread(
@@ -93,8 +89,6 @@ impl OxVoxEngine {
                 num_neighbours,
                 self.max_dist,
                 epsilon,
-                sparse,
-                l2_distance,
             )
         };
 
@@ -121,7 +115,7 @@ impl OxVoxEngine {
 #[pymodule]
 #[pyo3(name = "_ox_vox_nns")]
 fn ox_vox_nns<'py>(_py: Python<'py>, m: &'py PyModule) -> PyResult<()> {
-    // All our python interface is in the OxVoxNNS class
+    // All our python interface is in the OxVoxEngine class
     m.add_class::<OxVoxEngine>()?;
 
     // Return a successful PyResult if the module compiled successfully

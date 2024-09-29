@@ -4,7 +4,7 @@ use std::collections::{BinaryHeap, HashMap};
 use indicatif::{ParallelProgressIterator, ProgressIterator};
 
 use ndarray::parallel::prelude::*;
-use ndarray::{s, Array2, ArrayView1, ArrayView2, ArrayViewMut1, Axis};
+use ndarray::{s, Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1, Axis};
 
 struct Neighbour {
     search_point_idx: i32,
@@ -90,20 +90,25 @@ pub fn find_neighbours_singlethread(
 
     // Zip search points, query points, and output array chunks together, to be
     // processed in parallel
-    let processed_chunks: Vec<((Array2<i32>, Array2<f32>), (i32, i32, i32))> = keys.clone().into_iter()
+    let processed_chunks: Vec<((Array2<i32>, Array2<f32>), (i32, i32, i32))> = keys
+        .clone()
+        .into_iter()
         .progress_count(keys.len() as u64)
         .map(|voxel| {
-            (_process_query_point_voxel(
-                &voxel,
-                &query_points,
-                &query_points_by_voxel,
-                search_points,
-                search_points_by_voxel,
-                voxel_offsets,
-                num_neighbours,
-                max_dist,
-                epsilon,
-            ), voxel)
+            (
+                _process_query_point_voxel(
+                    &voxel,
+                    &query_points,
+                    &query_points_by_voxel,
+                    search_points,
+                    search_points_by_voxel,
+                    voxel_offsets,
+                    num_neighbours,
+                    max_dist,
+                    epsilon,
+                ),
+                voxel,
+            )
         })
         .collect();
 
@@ -115,9 +120,10 @@ pub fn find_neighbours_singlethread(
         Array2::from_elem([num_query_points, num_neighbours as usize], -1f32);
 
     // Insert values from processed voxel chunks back into output array
-    processed_chunks.iter().for_each(|((chunk_indices, chunk_distances), voxel)| {
+    processed_chunks
+        .iter()
+        .for_each(|((chunk_indices, chunk_distances), voxel)| {
             let query_point_indices = query_points_by_voxel.get(&voxel).unwrap();
-            let _chunk_num_points = query_point_indices.len();
             query_point_indices
                 .iter()
                 .map(|&idx| idx as usize)
@@ -163,21 +169,25 @@ pub fn find_neighbours(
 
     // Zip search points, query points, and output array chunks together, to be
     // processed in parallel
-    let processed_chunks: Vec<((Array2<i32>, Array2<f32>), (i32, i32, i32))> = keys.clone()
+    let processed_chunks: Vec<((Array2<i32>, Array2<f32>), (i32, i32, i32))> = keys
+        .clone()
         .into_par_iter()
         .progress_count(keys.len() as u64)
         .map(|voxel| {
-            (_process_query_point_voxel(
-                &voxel,
-                &query_points,
-                &query_points_by_voxel,
-                search_points,
-                search_points_by_voxel,
-                voxel_offsets,
-                num_neighbours,
-                max_dist,
-                epsilon,
-            ), voxel)
+            (
+                _process_query_point_voxel(
+                    &voxel,
+                    &query_points,
+                    &query_points_by_voxel,
+                    search_points,
+                    search_points_by_voxel,
+                    voxel_offsets,
+                    num_neighbours,
+                    max_dist,
+                    epsilon,
+                ),
+                voxel,
+            )
         })
         .collect();
 
@@ -189,9 +199,10 @@ pub fn find_neighbours(
         Array2::from_elem([num_query_points, num_neighbours as usize], -1f32);
 
     // Insert values from processed voxel chunks back into output array
-    processed_chunks.iter().for_each(|((chunk_indices, chunk_distances), voxel)| {
+    processed_chunks
+        .iter()
+        .for_each(|((chunk_indices, chunk_distances), voxel)| {
             let query_point_indices = query_points_by_voxel.get(&voxel).unwrap();
-            let _chunk_num_points = query_point_indices.len();
             query_point_indices
                 .iter()
                 .map(|&idx| idx as usize)
@@ -208,6 +219,7 @@ pub fn find_neighbours(
     (indices, distances)
 }
 
+/// Run kNN search for all query points in a given voxel
 fn _process_query_point_voxel(
     voxel: &(i32, i32, i32),
     query_points: &ArrayView2<f32>,
@@ -237,12 +249,12 @@ fn _process_query_point_voxel(
             query_points.row(idx as usize).assign_to(row);
         });
 
-    // Construct
+    // Construct output arrays for this chunk
     let mut indices_chunk: Array2<i32> =
         Array2::from_elem([query_point_indices.len(), num_neighbours as usize], -1i32);
     let mut distances_chunk: Array2<f32> =
         Array2::from_elem([query_point_indices.len(), num_neighbours as usize], -1f32);
-    
+
     // Map query point processing function across voxels of query points
     this_voxel_query_points
         .axis_iter(Axis(0))
@@ -324,10 +336,11 @@ fn _get_neighbouring_search_points(
 ///         points here
 ///     search_points: Reference to search points array, for indexing and comparing
 ///         distances
-///     points_by_voxel:
-///     voxel_offsets:  
+///     search_point_indices: Point indices (for indexing original source points array)
+///         corresponding to search points
 ///     num_neighbours:
-///     voxel_size:
+///     max_dist:
+///     epsilon:
 fn _find_query_point_neighbours(
     query_point: ArrayView1<f32>,
     mut indices_row: ArrayViewMut1<i32>,
@@ -376,6 +389,211 @@ fn _find_query_point_neighbours(
         indices_row[i] = neighbour.0.search_point_idx;
         distances_row[i] = neighbour.0.distance;
     }
+}
+
+/// Count the nearest neighbours within a given radius for each query point
+///
+/// Args:
+///     search_points: Pointcloud we are searching for neighbours within (S, 3)
+///     query_points: Points we are searching for the neighbours of (Q, 3)
+///     max_dist: Furthest distance to neighbouring points before we don't care about them
+///
+/// Returns:
+///     Indices of neighbouring points (Q, num_neighbours)
+///     Distances of neighbouring points from query point (Q, num_neighbours)
+pub fn count_neighbours_singlethread(
+    query_points: ArrayView2<f32>,
+    search_points: &Array2<f32>,
+    search_points_by_voxel: &HashMap<(i32, i32, i32), Vec<i32>>,
+    voxel_offsets: &Array2<i32>,
+    max_dist: f32,
+) -> Array1<u32> {
+    // Group query point indices by voxel into a hashmap indexed by voxel coordinates
+    let query_points_by_voxel = _group_by_voxel(query_points, max_dist);
+
+    // Extract keys (unique voxel coords) into a vec to ensure we iterate over the
+    // hashmap consistently
+    let keys: Vec<(i32, i32, i32)> = query_points_by_voxel.clone().into_keys().collect();
+
+    // Zip search points, query points, and output array chunks together, to be
+    // processed in parallel
+    let processed_chunks: Vec<(Array1<u32>, (i32, i32, i32))> = keys
+        .clone()
+        .into_iter()
+        .progress_count(keys.len() as u64)
+        .map(|voxel| {
+            (
+                _count_query_point_voxel(
+                    &voxel,
+                    &query_points,
+                    &query_points_by_voxel,
+                    search_points,
+                    search_points_by_voxel,
+                    voxel_offsets,
+                    max_dist,
+                ),
+                voxel,
+            )
+        })
+        .collect();
+
+    // Construct output arrays, initialised with 0s
+    let num_query_points = query_points.shape()[0];
+    let mut counts: Array1<u32> = Array1::from_elem([num_query_points], 0u32);
+
+    // Insert values from processed voxel chunks back into output array
+    processed_chunks.iter().for_each(|(chunk_counts, voxel)| {
+        let query_point_indices = query_points_by_voxel.get(&voxel).unwrap();
+        query_point_indices
+            .iter()
+            .map(|&idx| idx as usize)
+            .zip(chunk_counts.axis_iter(Axis(0)))
+            .for_each(|(query_point_idx, chunk_count)| {
+                chunk_count.assign_to(counts.slice_mut(s![query_point_idx]));
+            })
+    });
+
+    counts
+}
+
+/// Find the (up to) N nearest neighbours within a given radius for each query point
+///
+/// Args:
+///     search_points: Pointcloud we are searching for neighbours within (S, 3)
+///     query_points: Points we are searching for the neighbours of (Q, 3)
+///     num_neighbours: Maximum number of neighbours to search for
+///     max_dist: Furthest distance to neighbouring points before we don't care about them
+///     epsilon:
+///
+/// Returns:
+///     Indices of neighbouring points (Q, num_neighbours)
+///     Distances of neighbouring points from query point (Q, num_neighbours)
+pub fn count_neighbours(
+    query_points: ArrayView2<f32>,
+    search_points: &Array2<f32>,
+    search_points_by_voxel: &HashMap<(i32, i32, i32), Vec<i32>>,
+    voxel_offsets: &Array2<i32>,
+    max_dist: f32,
+) -> Array1<u32> {
+    // Group query point indices by voxel into a hashmap indexed by voxel coordinates
+    let query_points_by_voxel = _group_by_voxel(query_points, max_dist);
+
+    // Extract keys (unique voxel coords) into a vec to ensure we iterate over the
+    // hashmap consistently
+    let keys: Vec<(i32, i32, i32)> = query_points_by_voxel.clone().into_keys().collect();
+
+    // Zip search points, query points, and output array chunks together, to be
+    // processed in parallel
+    let processed_chunks: Vec<(Array1<u32>, (i32, i32, i32))> = keys
+        .clone()
+        .into_iter()
+        .progress_count(keys.len() as u64)
+        .map(|voxel| {
+            (
+                _count_query_point_voxel(
+                    &voxel,
+                    &query_points,
+                    &query_points_by_voxel,
+                    search_points,
+                    search_points_by_voxel,
+                    voxel_offsets,
+                    max_dist,
+                ),
+                voxel,
+            )
+        })
+        .collect();
+
+    // Construct output arrays, initialised with 0s
+    let num_query_points = query_points.shape()[0];
+    let mut counts: Array1<u32> = Array1::from_elem([num_query_points], 0u32);
+
+    // Insert values from processed voxel chunks back into output array
+    processed_chunks.iter().for_each(|(chunk_counts, voxel)| {
+        let query_point_indices = query_points_by_voxel.get(&voxel).unwrap();
+        query_point_indices
+            .iter()
+            .map(|&idx| idx as usize)
+            .zip(chunk_counts.axis_iter(Axis(0)))
+            .for_each(|(query_point_idx, chunk_count)| {
+                chunk_count.assign_to(counts.slice_mut(s![query_point_idx]));
+            })
+    });
+
+    counts
+}
+
+/// Run rNN count for all query points in a given voxel
+fn _count_query_point_voxel(
+    voxel: &(i32, i32, i32),
+    query_points: &ArrayView2<f32>,
+    query_points_by_voxel: &HashMap<(i32, i32, i32), Vec<i32>>,
+    search_points: &Array2<f32>,
+    search_points_by_voxel: &HashMap<(i32, i32, i32), Vec<i32>>,
+    voxel_offsets: &Array2<i32>,
+    max_dist: f32,
+) -> Array1<u32> {
+    // Extract search point neighbours for this voxel
+    let (neighbours, _) = _get_neighbouring_search_points(
+        voxel,
+        search_points,
+        search_points_by_voxel,
+        voxel_offsets,
+    );
+
+    // Construct contiguous array for query points
+    let query_point_indices = query_points_by_voxel.get(voxel).unwrap();
+    let mut this_voxel_query_points = Array2::zeros([query_point_indices.len(), 3]);
+    this_voxel_query_points
+        .axis_iter_mut(Axis(0))
+        .zip(query_point_indices.iter())
+        .for_each(|(row, &idx)| {
+            query_points.row(idx as usize).assign_to(row);
+        });
+
+    // Construct output arrays for this chunk
+    let mut counts_chunk: Array1<u32> = Array1::from_elem([query_point_indices.len()], 0u32);
+
+    // Map query point processing function across voxels of query points
+    this_voxel_query_points
+        .axis_iter(Axis(0))
+        .zip(counts_chunk.iter_mut())
+        .for_each(|(query_point, count)| {
+            *count = _count_query_point_neighbours(query_point, &neighbours, max_dist);
+        });
+
+    counts_chunk
+}
+
+/// Count how many neighbours are within a given radius of a query point
+///
+/// This function is intended to be mapped (maybe in parallel) across rows of an
+/// array of query points, zipped with rows from two mutable arrays for distances
+/// and indices, which we will write to
+///
+/// Args:
+///     query_point: The query point we are searching for neighbours of
+///     search_points: Reference to search points array, for indexing and comparing
+///         distances
+///     max_dist: Maximum distance to search for neighbours within
+fn _count_query_point_neighbours(
+    query_point: ArrayView1<f32>,
+    search_points: &Array2<f32>,
+    max_dist: f32,
+) -> u32 {
+    // Construct an iterator of only the neighbours that are within range, and count its
+    // length
+    search_points
+        .axis_iter(Axis(0))
+        .map(|search_point| {
+            let dx = query_point[0] - search_point[0];
+            let dy = query_point[1] - search_point[1];
+            let dz = query_point[2] - search_point[2];
+            (dx * dx + dy * dy + dz * dz).sqrt()
+        })
+        .filter(|distance| *distance < max_dist)
+        .collect::<Vec<_>>()
+        .len() as u32
 }
 
 /// Generate voxel coordinates for each point (i.e. find which voxel each point

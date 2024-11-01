@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bincode::{deserialize, serialize};
 use ndarray::Array2;
-use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray2};
 use pyo3::types::{PyBytes, PyModule};
 use pyo3::{pyclass, pymethods, pymodule, PyResult, Python};
 use serde::{Deserialize, Serialize};
@@ -93,6 +93,52 @@ impl OxVoxEngine {
         };
 
         (indices.into_pyarray(py), distances.into_pyarray(py))
+    }
+
+    /// Find how many neighbours exist within the search radius for each query point
+    ///
+    /// Args:
+    ///     query_points: Points to search for neighbours of (Q, 3)
+    ///     num_threads: Numper of parallel threads to use
+    ///
+    /// Returns:
+    ///     Number of neighbours within radius for each query point (Q,)
+    pub fn count_neighbours<'py>(
+        &self,
+        py: Python<'py>,
+        query_points: PyReadonlyArray2<'py, f32>,
+        num_threads: usize,
+    ) -> &'py PyArray1<u32> {
+        // Convert query points to rust ndarray
+        let query_points = query_points.as_array();
+
+        // Run find_neighbours function
+        let counts = if num_threads != 1 {
+            // Set number of threads in global thread pool
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .build_global()
+                .unwrap_or(());
+
+            // Query for neighbours
+            nns::count_neighbours(
+                query_points,
+                &self.search_points,
+                &self.points_by_voxel,
+                &self.voxel_offsets,
+                self.max_dist,
+            )
+        } else {
+            nns::count_neighbours_singlethread(
+                query_points,
+                &self.search_points,
+                &self.points_by_voxel,
+                &self.voxel_offsets,
+                self.max_dist,
+            )
+        };
+
+        counts.into_pyarray(py)
     }
 
     /// Implement deserialisation (unpickling) for OxVoxNNS objects

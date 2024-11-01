@@ -415,6 +415,10 @@ pub fn count_neighbours_singlethread(
     // hashmap consistently
     let keys: Vec<(i32, i32, i32)> = query_points_by_voxel.clone().into_keys().collect();
 
+    // Construct output arrays, initialised with 0s
+    let num_query_points = query_points.shape()[0];
+    let mut counts: Array1<u32> = Array1::from_elem([num_query_points], 0u32);
+
     // Zip search points, query points, and output array chunks together, to be
     // processed in parallel
     let processed_chunks: Vec<(Array1<u32>, (i32, i32, i32))> = keys
@@ -436,10 +440,6 @@ pub fn count_neighbours_singlethread(
             )
         })
         .collect();
-
-    // Construct output arrays, initialised with 0s
-    let num_query_points = query_points.shape()[0];
-    let mut counts: Array1<u32> = Array1::from_elem([num_query_points], 0u32);
 
     // Insert values from processed voxel chunks back into output array
     processed_chunks.iter().for_each(|(chunk_counts, voxel)| {
@@ -482,11 +482,15 @@ pub fn count_neighbours(
     // hashmap consistently
     let keys: Vec<(i32, i32, i32)> = query_points_by_voxel.clone().into_keys().collect();
 
+    // Construct output arrays, initialised with 0s
+    let num_query_points = query_points.shape()[0];
+    let mut counts: Array1<u32> = Array1::from_elem([num_query_points], 0u32);
+
     // Zip search points, query points, and output array chunks together, to be
     // processed in parallel
     let processed_chunks: Vec<(Array1<u32>, (i32, i32, i32))> = keys
         .clone()
-        .into_iter()
+        .into_par_iter()
         .progress_count(keys.len() as u64)
         .map(|voxel| {
             (
@@ -503,10 +507,6 @@ pub fn count_neighbours(
             )
         })
         .collect();
-
-    // Construct output arrays, initialised with 0s
-    let num_query_points = query_points.shape()[0];
-    let mut counts: Array1<u32> = Array1::from_elem([num_query_points], 0u32);
 
     // Insert values from processed voxel chunks back into output array
     processed_chunks.iter().for_each(|(chunk_counts, voxel)| {

@@ -1,6 +1,6 @@
 [package]
 name = "ox_vox_nns"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 authors = ["Hamish Morgan <ham430@gmail.com>"]
 description = "A hybrid-ish nearest neighbour search implemented in rust using voxels and hashmaps (/dictionaries)"

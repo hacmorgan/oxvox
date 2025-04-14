@@ -5,7 +5,7 @@ use bincode::{deserialize, serialize};
 use ndarray::Array2;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray2, PyReadonlyArray1};
 use pyo3::types::{PyBytes, PyModule, PyDict};
-use pyo3::{pyclass, pymethods, pymodule, pyfunction, PyResult, Python};
+use pyo3::{pyclass, pymethods, pymodule, pyfunction, PyResult, Python, wrap_pyfunction};
 use ndarray::Array1;
 use serde::{Deserialize, Serialize};
 
@@ -42,18 +42,18 @@ pub fn indices_by_field<'py>(
     });
 
     // Populate the hashmap in parallel
-    indices_by_id.iter_mut().into_par_iter().for_each(|(id_, indices_arr)| {
+    indices_by_id.iter_mut().for_each(|(id_, indices_arr)| {
 
         // Our arrays have already been allocated with the correct size, so we simply
         // track how far we are through the array
         let mut hashmap_inner_idx = 0;
 
         // Iterate over unique IDs and fill in the array with indices
-        for idx in 0..unique_ids.len() {
+        for idx in 0i64..unique_ids.len() as i64 {
 
             // If we find a match, add the index to the array
-            if unique_ids[idx] == *id_ {
-                indices_arr[&hashmap_inner_idx] = idx;
+            if unique_ids[idx as usize] == *id_ as i64 {
+                indices_arr[hashmap_inner_idx] = idx;
                 hashmap_inner_idx += 1;
             }
 
@@ -65,7 +65,7 @@ pub fn indices_by_field<'py>(
     });
 
     // Return the rust HashMap as a python dictionary
-    indices_by_id.into_pydict(py)
+    PyDict::from_sequence(indices_by_id.iter().map(|(k, v)| (k, v.into_pyarray(py))))
 }
 
 #[pymethods]
@@ -142,7 +142,7 @@ impl OxVoxNNSEngine {
             )
         };
 
-        (indices.into_pyarray(py), distances.into_pyarray(py))
+        Ok((indices.into_pyarray(py), distances.into_pyarray(py)))
     }
 
     /// Find how many neighbours exist within the search radius for each query point

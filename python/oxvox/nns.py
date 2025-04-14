@@ -10,7 +10,7 @@ import numpy as np
 from numpy.lib.recfunctions import structured_to_unstructured
 import numpy.typing as npt
 
-from ox_vox_nns._ox_vox_nns import OxVoxEngine
+from oxvox._oxvox import OxVoxNNSEngine
 
 
 class OxVoxNNS:
@@ -44,7 +44,7 @@ class OxVoxNNS:
         search_points = self._sanitise_points(search_points)
 
         # Construct internal rust neighbour searcher
-        self.engine = OxVoxEngine(search_points, search_radius)
+        self.engine = OxVoxNNSEngine(search_points, search_radius)
 
     def find_neighbours(
         self,

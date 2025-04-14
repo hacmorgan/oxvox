@@ -1,10 +1,10 @@
-#!/usr/bin/env -S python3 -m pytest -vvv
+#!/usr/bin/env -S pytest -vvv
 
 
 """
 Unit tests for rust binding test library
 
-Run this test script to verify that functions can be compiled and run, and produce 
+Run this test script to verify that functions can be compiled and run, and produce
 expected results
 
 n.b. The rust module needs to be compiled the first time this is run, but pytest will

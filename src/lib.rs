@@ -1,25 +1,75 @@
 use std::collections::HashMap;
+use rayon::prelude::*;
 
 use bincode::{deserialize, serialize};
 use ndarray::Array2;
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray2};
-use pyo3::types::{PyBytes, PyModule};
-use pyo3::{pyclass, pymethods, pymodule, PyResult, Python};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray2, PyReadonlyArray1};
+use pyo3::types::{PyBytes, PyModule, PyDict};
+use pyo3::{pyclass, pymethods, pymodule, pyfunction, PyResult, Python};
+use ndarray::Array1;
 use serde::{Deserialize, Serialize};
 
 mod nns;
 
 #[derive(Serialize, Deserialize)]
-#[pyclass(module = "ox_vox_nns")] // module = "blah" required for python to serialise correctly
-struct OxVoxEngine {
+#[pyclass(module = "oxvox")] // module = "blah" required for python to serialise correctly
+struct OxVoxNNSEngine {
     search_points: Array2<f32>,                          // (N, 3)
     points_by_voxel: HashMap<(i32, i32, i32), Vec<i32>>, // maps voxel_coords -> indices of search points in that voxel
     voxel_offsets: Array2<i32>,                          // (27, 3)
     max_dist: f32,
 }
 
+/*
+TODOs
+- how to convert hashmap to python dict?
+- how to correctly return a dictionary of arrays?
+*/
+
+#[pyfunction]
+pub fn indices_by_field<'py>(
+    py: Python<'py>,
+    unique_ids: PyReadonlyArray1<'py, i64>,
+    counts: PyReadonlyArray1<'py, i64>,
+) -> PyResult<PyDict> {
+    let unique_ids = unique_ids.as_array().to_owned();
+    let counts = counts.as_array().to_owned();
+
+    // Construct a hashmap mapping each unique ID to a list of indices
+    let mut indices_by_id = HashMap::new();
+    counts.iter().enumerate().for_each(|(id_, count)| {
+        indices_by_id.insert(id_, Array1::from_iter(0..*count));
+    });
+
+    // Populate the hashmap in parallel
+    indices_by_id.iter_mut().into_par_iter().for_each(|(id_, indices_arr)| {
+
+        // Our arrays have already been allocated with the correct size, so we simply
+        // track how far we are through the array
+        let mut hashmap_inner_idx = 0;
+
+        // Iterate over unique IDs and fill in the array with indices
+        for idx in 0..unique_ids.len() {
+
+            // If we find a match, add the index to the array
+            if unique_ids[idx] == *id_ {
+                indices_arr[&hashmap_inner_idx] = idx;
+                hashmap_inner_idx += 1;
+            }
+
+            // If we've filled the array, break
+            if hashmap_inner_idx == unique_ids.len() - 1 {
+                break;
+            }
+        }
+    });
+
+    // Return the rust HashMap as a python dictionary
+    indices_by_id.into_pydict(py)
+}
+
 #[pymethods]
-impl OxVoxEngine {
+impl OxVoxNNSEngine {
     /// Construct OxVoxNNS object
     ///
     /// Args:
@@ -34,7 +84,7 @@ impl OxVoxEngine {
         let (points_by_voxel, voxel_offsets) = nns::initialise_nns(&search_points, max_dist);
 
         // Construct the NNS object with computed values required for querying
-        OxVoxEngine {
+        OxVoxNNSEngine {
             search_points,
             points_by_voxel,
             voxel_offsets,
@@ -58,7 +108,7 @@ impl OxVoxEngine {
         num_neighbours: i32,
         num_threads: usize,
         epsilon: f32,
-    ) -> (&'py PyArray2<i32>, &'py PyArray2<f32>) {
+    ) -> PyResult<(&'py PyArray2<i32>, &'py PyArray2<f32>)> {
         // Convert query points to rust ndarray
         let query_points = query_points.as_array();
 
@@ -159,10 +209,12 @@ impl OxVoxEngine {
 }
 
 #[pymodule]
-#[pyo3(name = "_ox_vox_nns")]
-fn ox_vox_nns<'py>(_py: Python<'py>, m: &'py PyModule) -> PyResult<()> {
+#[pyo3(name = "_oxvox")]
+fn oxvox<'py>(_py: Python<'py>, m: &'py PyModule) -> PyResult<()> {
+
     // All our python interface is in the OxVoxEngine class
-    m.add_class::<OxVoxEngine>()?;
+    m.add_class::<OxVoxNNSEngine>()?;
+    m.add_function(wrap_pyfunction!(indices_by_field, m)?)?;
 
     // Return a successful PyResult if the module compiled successfully
     Ok(())

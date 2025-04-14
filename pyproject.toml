@@ -3,7 +3,7 @@ requires = ["maturin>=1.4,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "ox_vox_nns"
+name = "oxvox"
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Rust",
@@ -17,4 +17,4 @@ dependencies = ["numpy"]
 features = ["pyo3/extension-module"]
 # compatibility = "linux"  # not just GNU
 python-source = "python"
-module-name = "ox_vox_nns._ox_vox_nns"
+module-name = "oxvox._oxvox"

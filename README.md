@@ -1,15 +1,15 @@
-# OxVoxNNS - **Ox**idised **Vox**elised **N**earest **N**eighbour **S**earch
+# OxVox - **Ox**idised **Vox**elised Operations on Arrays
 
-[![PyPI](https://img.shields.io/pypi/v/cibuildwheel.svg)](https://pypi.org/project/ox-vox-nns/)
-[![Actions Status](https://github.com/hacmorgan/OxVoxNNS/workflows/CI/badge.svg)](https://github.com/hacmorgan/OxVoxNNS/actions)
+[![PyPI](https://img.shields.io/pypi/v/cibuildwheel.svg)](https://pypi.org/project/oxvox/)
+[![Actions Status](https://github.com/hacmorgan/oxvox/workflows/CI/badge.svg)](https://github.com/hacmorgan/oxvox/actions)
 
-A hybrid-ish nearest neighbour search implemented in rust, tailored towards consistent performance, especially on difficult inputs for KDTrees
+A collection of operations on arrays and pointclouds implemented in Rust
 
 
 ## Installation
 ### Precompiled (from PyPI, recommended)
 ```
-pip install ox_vox_nns
+pip install oxvox
 ```
 
 ### Manual
@@ -23,12 +23,12 @@ maturin develop --release
 Basic usage, query a block of query points in **sparse** mode:
 ```
 import numpy as np
-from ox_vox_nns.ox_vox_nns import OxVoxNNS
+from oxvox.nns import OxVoxNNS
 
 NUM_POINTS = 100_000
 TEST_POINTS = np.random.random((NUM_POINTS, 3))
 
-indices, distances = ox_vox_nns.OxVoxNNS(
+indices, distances = OxVoxNNS(
     search_points=TEST_POINTS,
     max_dist=0.05,
 ).find_neighbours(

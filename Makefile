@@ -19,7 +19,7 @@ help: # Show help for each of the Makefile recipes.
 ###############
 
 test-python: # Run python tests
-	@pytest --verbose --ignore=third_party python/oxvox/tests
+	@python -m pytest --verbose --ignore=third_party python/oxvox/tests
 
 test: # Run all tests
 	@make test-python

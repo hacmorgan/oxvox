@@ -49,7 +49,7 @@ pub fn indices_by_field<'py>(
     });
 
     // Populate the hashmap in parallel
-    indices_by_id.iter_mut().for_each(|(id_, indices_arr)| {
+    indices_by_id.par_iter_mut().for_each(|(id_, indices_arr)| {
 
         // Our arrays have already been allocated with the correct size, so we simply
         // track how far we are through the array

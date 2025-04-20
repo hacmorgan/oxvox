@@ -48,6 +48,9 @@ jobs:
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
+      - name: Run tests
+        run: |
+          make test
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:

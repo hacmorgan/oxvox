@@ -5,8 +5,8 @@ use bincode::{deserialize, serialize};
 use ndarray::Array2;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray2, PyReadonlyArray1};
 use pyo3::types::{PyBytes, PyModule, PyDict};
-use pyo3::{pyclass, pymethods, pymodule, pyfunction, PyResult, Python, wrap_pyfunction};
-use ndarray::Array1;
+use pyo3::{pyclass, pymethods, pymodule, pyfunction, PyResult, Python, wrap_pyfunction, IntoPy};
+use ndarray::{Array1, ShapeBuilder};
 use serde::{Deserialize, Serialize};
 
 mod nns;
@@ -26,19 +26,26 @@ TODOs
 - how to correctly return a dictionary of arrays?
 */
 
+/// Rust engine for computing row indices for each unique value in a field or fields in a pointcloud
+///
+/// Args:
+///     unique_ids: Array of unique IDs for each point in the pointcloud (same length as the pointcloud)
+///     counts: Array of counts for each unique ID
+///
+/// Returns:
 #[pyfunction]
 pub fn indices_by_field<'py>(
     py: Python<'py>,
     unique_ids: PyReadonlyArray1<'py, i64>,
     counts: PyReadonlyArray1<'py, i64>,
-) -> PyResult<PyDict> {
+) -> PyResult<&'py PyDict> {
     let unique_ids = unique_ids.as_array().to_owned();
     let counts = counts.as_array().to_owned();
 
     // Construct a hashmap mapping each unique ID to a list of indices
     let mut indices_by_id = HashMap::new();
     counts.iter().enumerate().for_each(|(id_, count)| {
-        indices_by_id.insert(id_, Array1::from_iter(0..*count));
+        indices_by_id.insert(id_, Array1::<u64>::zeros(*count as usize));
     });
 
     // Populate the hashmap in parallel
@@ -49,11 +56,11 @@ pub fn indices_by_field<'py>(
         let mut hashmap_inner_idx = 0;
 
         // Iterate over unique IDs and fill in the array with indices
-        for idx in 0i64..unique_ids.len() as i64 {
+        for idx in 0..unique_ids.len() {
 
             // If we find a match, add the index to the array
-            if unique_ids[idx as usize] == *id_ as i64 {
-                indices_arr[hashmap_inner_idx] = idx;
+            if unique_ids[idx] == *id_ as i64 {
+                indices_arr[hashmap_inner_idx] = idx as u64;
                 hashmap_inner_idx += 1;
             }
 
@@ -64,8 +71,13 @@ pub fn indices_by_field<'py>(
         }
     });
 
-    // Return the rust HashMap as a python dictionary
-    PyDict::from_sequence(indices_by_id.iter().map(|(k, v)| (k, v.into_pyarray(py))))
+    let dict = PyDict::new(py);
+    for (k, v) in indices_by_id.iter() {
+        dict.set_item(k.into_py(py), v.clone().into_pyarray(py))?;
+    }
+
+    Ok(dict)
+
 }
 
 #[pymethods]

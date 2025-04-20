@@ -53,6 +53,15 @@ for query_points_chunk in query_points_chunks:
 ```
 
 
+## Tests
+All test files are executable for spot-testing functionality
+
+To run all tests:
+```
+make test
+```
+
+
 ## Performance
 As a rough heuristic:
 

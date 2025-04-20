@@ -2,43 +2,66 @@
 Array indexing operations
 """
 
-from typing import Tuple
-from functools import partial
+from typing import Any, Iterator
 
 import numpy as np
-from numpy.lib.recfunctions import structured_to_unstructured
 import numpy.typing as npt
+import numpy_indexed as npi
 
-from oxvox._oxvox import OxVoxIndexing
+from oxvox._oxvox import indices_by_field as indices_by_field_rust
 
 
-def indices_by_field(arr: npt.NDArray[Any], fields: str | tuple[str, ...]) -> npt.NDArray[np.int32]:
+def indices_by_field(
+    arr: npt.NDArray[Any], fields: str | tuple[str, ...]
+) -> Iterator[tuple[Any, npt.NDArray[np.int32]]]:
     """
     Compute row indices for each value in a given field in a structured array
 
-    This can be useful for modifying an array in-place. The following snippet also does
-    this, but requires a full pass through the array for each unique value, making it
-    O(n*u) where n is the number of rows and u is the number of unique values
-
-        for value in np.unique(arr[fields]):
-            arr[arr[fields] == value] = some_updated_value
-
-    Similarly, we can use numpy_indexed to do this in O(n+u), so long as we accept the
-    output array being sorted by the fields we are splitting by
-
-        chunks = []
-        for chunk in npi.group_by(arr[fields]).split(arr):
-            chunk["some_field"] = some_updated_value
-            chunks.append(chunk)
-        return np.concatenate(chunks)
+    This can be useful for modifying an array in-place. If this is not a requirement,
+    consider using the numpy_indexed library directly (used internally by this function)
 
     Args:
         arr: Structured array to compute row indices for
         fields: Field(s) to split by
 
-    Returns:
-        Row indices for each value in the given field(s)
+    Yields:
+        Value(s) in the given field(s) in the input array
+        Row indices with those values
+
+    Examples:
+
+        The following snippet modifies in-place, but requires a full pass through the
+        array for each unique value, making it O(n*u) where n is the number of rows and
+        u is the number of unique values:
+
+            for value in np.unique(arr[fields]):
+                arr[arr[fields] == value] = some_updated_value
+
+        Similarly, we can use numpy_indexed to do this in O(n+u), so long as we accept
+        the output array being sorted by the fields we are splitting by:
+
+            chunks = []
+            for chunk in npi.group_by(arr[fields]).split(arr):
+                chunk["some_field"] = some_updated_value
+                chunks.append(chunk)
+            return np.concatenate(chunks)
+
+        With oxvox we can do this in O(n+u) time, in parallel, and without sorting the
+        output array:
+
+            for value, indices in indices_by_field(arr, fields):
+                arr[indices] = some_updated_value
+
+        n.b. If you don't need the values in the array, and are happy with unique
+        sequential IDs as dictionary keys, you can use the underlying
+        `indices_by_field_rust` directly:
+
+            for offset, indices in enumerate(
+                indices_by_field_rust(unique_ids, counts).values()
+            ):
+                arr[indices] += offset
     """
+
     # We first use numpy_indexed (because it handles structured arrays nicely) to get:
     # - An array the same length as the input array, with a unique ID for each unique
     #       set of values in the given field(s)
@@ -49,11 +72,9 @@ def indices_by_field(arr: npt.NDArray[Any], fields: str | tuple[str, ...]) -> np
     unique_values = grouper.unique
     counts = grouper.count
 
-    # We quickly create a lookup from unique array values to their unique IDs
-    value_to_index = dict(enumerate(unique_values))
+    # We quickly create a lookup from unique IDs to their unique array values
+    index_to_value = dict(enumerate(unique_values))
 
     # Now we use the rust engine to compute the row indices for each unique ID
-    indices_by_field = indices_by_field(unique_ids, counts)
-
-    # Remap the indices to the original array values
-    return {value: indices_by_field[value_to_index[value]] for value in unique_values}
+    for unique_id, indices in indices_by_field_rust(unique_ids, counts).items():
+        yield index_to_value[unique_id], indices

@@ -17,7 +17,7 @@ import numpy as np
 import numpy.lib.recfunctions as rf
 import pytest
 
-from ox_vox_nns.ox_vox_nns import OxVoxNNS
+from oxvox.nns import OxVoxNNS
 
 
 TEST_ARRAY = np.arange(9, dtype=np.float32).reshape((3, 3))

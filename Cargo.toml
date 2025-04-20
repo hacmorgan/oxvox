@@ -1,17 +1,17 @@
 [package]
-name = "ox_vox_nns"
-version = "0.6.2"
+name = "oxvox"
+version = "0.7.0"
 edition = "2021"
 authors = ["Hamish Morgan <ham430@gmail.com>"]
-description = "A hybrid-ish nearest neighbour search implemented in rust using voxels and hashmaps (/dictionaries)"
+description = "Performant operations on array & pointcloud data, written in Rust"
 readme = "README.md"
-repository = "https://github.com/hacmorgan/OxVoxNNS"
+repository = "https://github.com/hacmorgan/oxvox"
 license-file =  "LICENSE"
-keywords = ["nearest", "neighbour", "pointcloud"]
+keywords = ["nearest", "neighbour", "pointcloud", "array", "ndarray", "python"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "ox_vox_nns"
+name = "oxvox"
 crate-type = ["cdylib"]
 
 [dependencies]

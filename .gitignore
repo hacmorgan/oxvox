@@ -24,3 +24,4 @@ Cargo.lock
 
 # Python cache
 __pycache__
+.vscode

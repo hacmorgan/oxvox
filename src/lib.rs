@@ -1,25 +1,87 @@
 use std::collections::HashMap;
+use rayon::prelude::*;
 
 use bincode::{deserialize, serialize};
 use ndarray::Array2;
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray2};
-use pyo3::types::{PyBytes, PyModule};
-use pyo3::{pyclass, pymethods, pymodule, PyResult, Python};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray2, PyReadonlyArray1};
+use pyo3::types::{PyBytes, PyModule, PyDict};
+use pyo3::{pyclass, pymethods, pymodule, pyfunction, PyResult, Python, wrap_pyfunction, IntoPy};
+use ndarray::{Array1, ShapeBuilder};
 use serde::{Deserialize, Serialize};
 
 mod nns;
 
 #[derive(Serialize, Deserialize)]
-#[pyclass(module = "ox_vox_nns")] // module = "blah" required for python to serialise correctly
-struct OxVoxEngine {
+#[pyclass(module = "oxvox")] // module = "blah" required for python to serialise correctly
+struct OxVoxNNSEngine {
     search_points: Array2<f32>,                          // (N, 3)
     points_by_voxel: HashMap<(i32, i32, i32), Vec<i32>>, // maps voxel_coords -> indices of search points in that voxel
     voxel_offsets: Array2<i32>,                          // (27, 3)
     max_dist: f32,
 }
 
+/*
+TODOs
+- how to convert hashmap to python dict?
+- how to correctly return a dictionary of arrays?
+*/
+
+/// Rust engine for computing row indices for each unique value in a field or fields in a pointcloud
+///
+/// Args:
+///     unique_ids: Array of unique IDs for each point in the pointcloud (same length as the pointcloud)
+///     counts: Array of counts for each unique ID
+///
+/// Returns:
+#[pyfunction]
+pub fn indices_by_field<'py>(
+    py: Python<'py>,
+    unique_ids: PyReadonlyArray1<'py, i64>,
+    counts: PyReadonlyArray1<'py, i64>,
+) -> PyResult<&'py PyDict> {
+    let unique_ids = unique_ids.as_array().to_owned();
+    let counts = counts.as_array().to_owned();
+
+    // Construct a hashmap mapping each unique ID to a list of indices
+    let mut indices_by_id = HashMap::new();
+    counts.iter().enumerate().for_each(|(id_, count)| {
+        indices_by_id.insert(id_, Array1::<u64>::zeros(*count as usize));
+    });
+
+    // Populate the hashmap in parallel
+    indices_by_id.par_iter_mut().for_each(|(id_, indices_arr)| {
+
+        // Our arrays have already been allocated with the correct size, so we simply
+        // track how far we are through the array
+        let mut hashmap_inner_idx = 0;
+
+        // Iterate over unique IDs and fill in the array with indices
+        for idx in 0..unique_ids.len() {
+
+            // If we find a match, add the index to the array
+            if unique_ids[idx] == *id_ as i64 {
+                indices_arr[hashmap_inner_idx] = idx as u64;
+                hashmap_inner_idx += 1;
+            }
+
+            // If we've filled the array, break
+            if hashmap_inner_idx == unique_ids.len() - 1 {
+                break;
+            }
+        }
+    });
+
+    let dict = PyDict::new(py);
+    for (k, v) in indices_by_id.iter() {
+        dict.set_item(k.into_py(py), v.clone().into_pyarray(py))?;
+    }
+
+    Ok(dict)
+
+}
+
 #[pymethods]
-impl OxVoxEngine {
+impl OxVoxNNSEngine {
     /// Construct OxVoxNNS object
     ///
     /// Args:
@@ -34,7 +96,7 @@ impl OxVoxEngine {
         let (points_by_voxel, voxel_offsets) = nns::initialise_nns(&search_points, max_dist);
 
         // Construct the NNS object with computed values required for querying
-        OxVoxEngine {
+        OxVoxNNSEngine {
             search_points,
             points_by_voxel,
             voxel_offsets,
@@ -58,7 +120,7 @@ impl OxVoxEngine {
         num_neighbours: i32,
         num_threads: usize,
         epsilon: f32,
-    ) -> (&'py PyArray2<i32>, &'py PyArray2<f32>) {
+    ) -> PyResult<(&'py PyArray2<i32>, &'py PyArray2<f32>)> {
         // Convert query points to rust ndarray
         let query_points = query_points.as_array();
 
@@ -92,7 +154,7 @@ impl OxVoxEngine {
             )
         };
 
-        (indices.into_pyarray(py), distances.into_pyarray(py))
+        Ok((indices.into_pyarray(py), distances.into_pyarray(py)))
     }
 
     /// Find how many neighbours exist within the search radius for each query point
@@ -159,10 +221,12 @@ impl OxVoxEngine {
 }
 
 #[pymodule]
-#[pyo3(name = "_ox_vox_nns")]
-fn ox_vox_nns<'py>(_py: Python<'py>, m: &'py PyModule) -> PyResult<()> {
+#[pyo3(name = "_oxvox")]
+fn oxvox<'py>(_py: Python<'py>, m: &'py PyModule) -> PyResult<()> {
+
     // All our python interface is in the OxVoxEngine class
-    m.add_class::<OxVoxEngine>()?;
+    m.add_class::<OxVoxNNSEngine>()?;
+    m.add_function(wrap_pyfunction!(indices_by_field, m)?)?;
 
     // Return a successful PyResult if the module compiled successfully
     Ok(())

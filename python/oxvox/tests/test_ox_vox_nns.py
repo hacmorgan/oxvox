@@ -1,10 +1,10 @@
-#!/usr/bin/env -S python3 -m pytest -vvv
+#!/usr/bin/env -S pytest -vvv
 
 
 """
 Unit tests for rust binding test library
 
-Run this test script to verify that functions can be compiled and run, and produce 
+Run this test script to verify that functions can be compiled and run, and produce
 expected results
 
 n.b. The rust module needs to be compiled the first time this is run, but pytest will
@@ -17,7 +17,7 @@ import numpy as np
 import numpy.lib.recfunctions as rf
 import pytest
 
-from ox_vox_nns.ox_vox_nns import OxVoxNNS
+from oxvox.nns import OxVoxNNS
 
 
 TEST_ARRAY = np.arange(9, dtype=np.float32).reshape((3, 3))

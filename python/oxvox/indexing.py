@@ -13,7 +13,7 @@ from oxvox._oxvox import indices_by_field as indices_by_field_rust
 
 def indices_by_field(
     arr: npt.NDArray[Any], fields: str | tuple[str, ...]
-) -> Iterator[tuple[Any, npt.NDArray[np.int32]]]:
+) -> Iterator[tuple[Any, npt.NDArray[np.uint64]]]:
     """
     Compute row indices for each value in a given field in a structured array
 

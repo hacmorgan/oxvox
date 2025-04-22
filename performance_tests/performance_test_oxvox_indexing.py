@@ -19,7 +19,7 @@ BIGASS_ARRAY = rfn.unstructured_to_structured(
 )
 
 
-def test_indices_by_field_native():
+def test_indices_by_field_naive():
     start = time()
     for unique_values in np.unique(BIGASS_ARRAY[["a", "b"]]):
         values = BIGASS_ARRAY[
@@ -44,6 +44,6 @@ def test_indices_by_field_oxvox():
 
 
 if __name__ == "__main__":
-    test_indices_by_field_native()
+    test_indices_by_field_naive()
     test_indices_by_field_npi()
     test_indices_by_field_oxvox()

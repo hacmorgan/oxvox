@@ -1,4 +1,4 @@
-# OxVox - **Ox**idised **Vox**elised Operations on Arrays
+# OxVox - **Ox**idised **Vox**elised toolkit
 
 [![PyPI](https://img.shields.io/pypi/v/cibuildwheel.svg)](https://pypi.org/project/oxvox/)
 [![Actions Status](https://github.com/hacmorgan/oxvox/workflows/CI/badge.svg)](https://github.com/hacmorgan/oxvox/actions)
@@ -8,20 +8,48 @@ A collection of operations on arrays and pointclouds implemented in Rust
 
 ## Installation
 ### Precompiled (from PyPI, recommended)
-```
+```bash
 pip install oxvox
 ```
 
 ### Manual
 Checkout this repo and enter a virtual environment, then run
-```
+```bash
 maturin develop --release
 ```
 
 
 ## Usage
-Basic usage, query a block of query points in **sparse** mode:
+### Indexing by field
+```python
+In [7]: from oxvox.indexing import indices_by_field
+   ...: 
+   ...: TEST_ARRAY = np.array(
+   ...:     [
+   ...:         (2, "a"),
+   ...:         (3, "b"),
+   ...:         (2, "a"),
+   ...:         (3, "c"),
+   ...:         (4, "a"),
+   ...:         (4, "c"),
+   ...:     ],
+   ...:     dtype=[
+   ...:         ("score", np.int32),
+   ...:         ("initial", "|O"),
+   ...:     ],
+   ...: )
+   ...: 
+   ...: for row_values, row_indices in indices_by_field(arr=TEST_ARRAY, fields=["score"]):
+   ...:     print(f"Unique value: {row_values.tolist()} at row indices {row_indices}")
+   ...: 
+Unique value: (2,) at row indices [0 2]
+Unique value: (3,) at row indices [1 3]
+Unique value: (4,) at row indices [4 5]
 ```
+
+### Nearest Neighbour Search (NNS)
+Basic usage, query a block of query points in **sparse** mode:
+```python
 import numpy as np
 from oxvox.nns import OxVoxNNS
 
@@ -39,7 +67,7 @@ indices, distances = OxVoxNNS(
 ```
 
 More complex usage, using a single NNS object for multiple *exact* mode queries (e.g. to distribute the `nns` object and perform queries in parallel, or to query from a large number of query points in batches/chunks)
-```
+```python
 # same imports and test data as above
 
 nns = ox_vox_nns.OxVoxNNS(TEST_POINTS, 0.1)
@@ -57,18 +85,33 @@ for query_points_chunk in query_points_chunks:
 All test files are executable for spot-testing functionality
 
 To run all tests:
-```
+```bash
 make test
 ```
 
 
 ## Performance
-As a rough heuristic:
+See performance tests under `performance_tests` directory
 
-- Open3D will edge out OxVox on **easier data**, e.g. uniformally distributed points, though OxVox does outperform SciPy and SKLearn's KDTree implementations
-- OxVox in exact mode will outperform even Open3D on harder inputs, e.g. with clusters of very dense points
-- OxVox in sparse mode or with `epsilon > 0.0` will dramatically outperform KDTrees too. This is not really a fair comparison, but if you don't strictly need the exact `k` nearest neighbours it can be very helpful
 
-See `performance_test_ox_vox_nns.py` for test code.
+## Building & Pushing to PyPI
+1. Generate CI YAML (still TODO: run tests after building before pushing to PyPI)
+```
+maturin generate-ci > .github/workflows/CI.yml
+```
+ 
+2. Update `cargo.toml`
+```toml
+[package]
+name = "oxvox"
+version = "0.7.1"
+...
+```
 
-More thorough tests and interactive visualisations are still being developed to help a prospective user decide quickly if OxVox is worth trying
+3. Tag with version number and push
+```bash
+git commit -am "Push version 0.7.1"
+git tag 0.7.1
+git push --tags
+```
+

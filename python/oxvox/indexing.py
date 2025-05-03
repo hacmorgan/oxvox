@@ -10,6 +10,7 @@ import numpy.typing as npt
 import numpy_indexed as npi
 
 from oxvox._oxvox import indices_by_field as indices_by_field_rust
+from oxvox.util import _default_dtype
 
 
 def indices_by_field(
@@ -80,11 +81,3 @@ def indices_by_field(
     # Now we use the rust engine to compute the row indices for each unique ID
     for unique_id, indices in indices_by_field_rust(unique_ids, counts).items():
         yield index_to_value[unique_id], indices.astype(indices_dtype)
-
-
-@lru_cache
-def _default_dtype() -> np.dtype:
-    """
-    Return a sensible default integer type to use for row indices for this platform
-    """
-    return np.uint32 if sys.maxsize <= 2**32 else np.uint64

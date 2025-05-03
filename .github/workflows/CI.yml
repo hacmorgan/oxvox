@@ -37,10 +37,15 @@ jobs:
           - runner: ubuntu-22.04
             target: ppc64le
     steps:
+      # Checkout code
       - uses: actions/checkout@v4
+
+      # Setup Python
       - uses: actions/setup-python@v5
         with:
           python-version: 3.x
+
+      # Compile rust code and build wheels
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -48,11 +53,22 @@ jobs:
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
+
+      # Setup upterm session to allow SSH debugging
+      - name: Setup upterm session
+        uses: lhotari/action-upterm@v1
+        with:
+          ## limits ssh access and adds the ssh public key for the user which triggered the workflow
+          limit-access-to-actor: true
+
+      # Run unit tests
       - name: Run tests
         run: |
           pip install numpy numpy_indexed pytest
           pip install oxvox --no-index --no-deps --find-links dist --force-reinstall
-          make test
+          make test -vvv
+
+      # Upload wheels to PyPI
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:

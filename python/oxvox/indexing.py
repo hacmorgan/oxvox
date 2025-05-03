@@ -2,6 +2,7 @@
 Array indexing operations
 """
 
+from functools import lru_cache
 from typing import Any, Iterator
 
 import numpy as np
@@ -12,8 +13,8 @@ from oxvox._oxvox import indices_by_field as indices_by_field_rust
 
 
 def indices_by_field(
-    arr: npt.NDArray[Any], fields: str | tuple[str, ...]
-) -> Iterator[tuple[Any, npt.NDArray[np.uint64]]]:
+    arr: npt.NDArray[Any], fields: str | tuple[str, ...], indices_dtype: np.dtype = _default_dtype()
+) -> Iterator[tuple[Any, npt.NDArray[np.integer]]]:
     """
     Compute row indices for each value in a given field in a structured array
 
@@ -23,6 +24,7 @@ def indices_by_field(
     Args:
         arr: Structured array to compute row indices for
         fields: Field(s) to split by
+        indices_dtype: Integer type to use for row indices
 
     Yields:
         Value(s) in the given field(s) in the input array
@@ -77,4 +79,12 @@ def indices_by_field(
 
     # Now we use the rust engine to compute the row indices for each unique ID
     for unique_id, indices in indices_by_field_rust(unique_ids, counts).items():
-        yield index_to_value[unique_id], indices
+        yield index_to_value[unique_id], indices.astype(indices_dtype)
+
+
+@lru_cache
+def _default_dtype() -> np.dtype:
+    """
+    Return a sensible default integer type to use for row indices for this platform
+    """
+    return np.uint32 if sys.maxsize <= 2**32 else np.uint64

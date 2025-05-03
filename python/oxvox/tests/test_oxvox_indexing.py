@@ -8,7 +8,10 @@ import numpy as np
 import numpy.lib.recfunctions as rf
 import pytest
 
-from oxvox.indexing import indices_by_field
+from oxvox.indexing import indices_by_field, _default_dtype
+
+
+PLATFORM_DTYPE = _default_dtype()
 
 
 TEST_ARRAY = np.array(
@@ -43,8 +46,8 @@ def test_indices_by_field() -> None:
             (4, [4, 5]),
         ],
     ):
-        np.testing.assert_array_equal(computed[0], expected[0])
-        np.testing.assert_array_equal(computed[1], expected[1])
+        np.testing.assert_array_equal(computed[0], expected[0].astype(PLATFORM_DTYPE))
+        np.testing.assert_array_equal(computed[1], expected[1].astype(PLATFORM_DTYPE))
 
     # Test multiple fields
     for computed, expected in zip(
@@ -61,5 +64,5 @@ def test_indices_by_field() -> None:
             ((4, 30), [5]),
         ],
     ):
-        np.testing.assert_array_equal(tuple(computed[0]), expected[0])
-        np.testing.assert_array_equal(tuple(computed[1]), expected[1])
+        np.testing.assert_array_equal(tuple(computed[0]), expected[0].astype(PLATFORM_DTYPE))
+        np.testing.assert_array_equal(tuple(computed[1]), expected[1].astype(PLATFORM_DTYPE))

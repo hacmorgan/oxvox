@@ -95,12 +95,22 @@ See performance tests under `performance_tests` directory
 
 
 ## Building & Pushing to PyPI
-1. Generate CI YAML (still TODO: run tests after building before pushing to PyPI)
+1. Get modifications made to existing workflow
+```bash
+diff .github/workflow{_templates,s}/CI.yml > /tmp/CI.patch
 ```
-maturin generate-ci > .github/workflows/CI.yml
+
+2. Generate updated CI YAML
+```bash
+maturin generate-ci github > .github/workflows/CI.yml
 ```
- 
-2. Update `cargo.toml`
+
+3. Apply changes to CI YAML (do manually if application of patch fails)
+```bash
+patch .github/workflows/CI.yml /tmp/CI.patch
+```
+
+4. Update `cargo.toml`
 ```toml
 [package]
 name = "oxvox"
@@ -108,7 +118,7 @@ version = "0.7.1"
 ...
 ```
 
-3. Tag with version number and push
+5. Tag with version number and push
 ```bash
 git commit -am "Push version 0.7.1"
 git tag 0.7.1

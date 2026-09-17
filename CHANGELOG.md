@@ -27,9 +27,57 @@
 - `progress=True` on `find_neighbours`/`count_neighbours` shows a progress bar; bars are
   now off by default.
 - Cargo feature `kiddo-baseline` compiles in the `kiddo` crate as `method="kiddo"` for
-  benchmarking (not in released wheels).
+  benchmarking (not in released wheels). **It stays behind the feature flag**: the plan
+  was to promote it to a standard backend if it matched or beat the hand-rolled
+  KD-tree, and over the 708 measured grid points it does not. Query time, kiddo
+  relative to `kdtree`: median 1.07x, 10th percentile 0.69x, 90th percentile 2.25x;
+  `kdtree` is more than 5% faster at 52% of grid points, kiddo at 33%, and the rest are
+  within 5%. Per cloud family, kiddo only wins on the uniform box (median 0.91x) and
+  loses on the cylinder shell (1.24x), the planar sheet (1.23x) and both real laser
+  scans (1.25x and 1.31x). Builds are a median 1.13x slower (up to 3.34x); its one
+  clear win is memory, using a median 0.71x the resident memory of our tree. As a fixed
+  choice it would be the wrong default (fastest at 39% of grid points against 56%), so
+  a permanent third-party dependency in every released wheel is not justified.
+- `benchmarks/`: a comparison harness for every backend against scipy's `cKDTree` and
+  Open3D's hybrid search, over five seeded synthetic pointcloud families (uniform box,
+  Gaussian clusters, cylinder shell with axial density falloff, near-planar sheet, mixed
+  scene) and any real pointclouds given on the command line. Build and query time are
+  measured separately (warm-up, then the median of three) in one forked worker per
+  index, radii are calibrated per cloud so a density column really means that many
+  points per search sphere, every exact implementation's answers are checked against
+  scipy's, and peak RSS is recorded. `python -m benchmarks.run [--quick]` writes the
+  JSON, `python -m benchmarks.report` builds `benchmarks/results/report.html`, and
+  `python -m benchmarks.heuristic` scores the `method="auto"` rule against the results.
+  `performance_tests/` and `benchmarks/steelman_voxel.py` are removed; their scenarios
+  are generator families now.
+- `method="auto"` now chooses a backend instead of standing in for `"voxel"`, through
+  `oxvox.nns.choose_auto_method`. It resolves to `"kdtree"`, and that is the whole
+  rule, because that is all the measurements support. Scored over the 707 grid points
+  where all four exact backends ran: always-kdtree is fastest at 56% of them (median
+  1.00x, p90 1.48x of the best backend at that point), always-kiddo at 39% (1.09x,
+  2.31x), always-voxel at 3% (1.71x, 4.88x), always-hybrid at 2% (1.82x, 3.86x). The
+  ceiling for any construction-time rule - an oracle that may choose per cloud and
+  radius, but not per `num_neighbours` or per query batch, since neither is known when
+  the index is built - is 70% (1.00x, 1.20x). Rules keyed on the grid occupancy (mean
+  and maximum points per cell, both cheap to compute before building) bought two points
+  of hit rate and a worse worst case, so none ships; `python -m benchmarks.heuristic`
+  re-scores the rule against the recorded results.
+- README documents that a rayon thread pool does not survive `fork`: a process that has
+  already run an oxvox query cannot run one in a child created by `multiprocessing`'s
+  default start method on Linux (the child waits on worker threads that do not exist).
+  Use the `"spawn"` start method, or keep every oxvox call in the children.
 
 ### Changed
+- **The voxel grid is no longer the method to reach for, and the benchmark says so.**
+  Measured against the hand-rolled KD-tree over the whole grid, the grid is a median
+  1.6x slower, is the fastest exact backend at 3% of grid points (all of them
+  sub-millisecond runs), and collapses on genuinely dense data: on a 16M-point laser
+  scan searched at 20 cm (about 40 000 points per sphere) it takes 10.6 s to the
+  KD-tree's 0.06 s for a million single-neighbour queries. `hybrid` removes that
+  collapse (1.8 s on the same case) without ever beating the tree. The grid keeps its
+  place - it is still exact, still the backend whose cost depends only on local density,
+  and `cells_per_radius=2` halves its clustered-data cost - but `auto` does not pick it
+  and the README no longer recommends it.
 - Voxel backend rewritten for speed. Points are stored sorted by cell (CSR layout)
   instead of a hashmap of per-cell vectors; the scan compares squared distances and
   keeps only the k best candidates in a bounded heap (was: sqrt per candidate and a heap

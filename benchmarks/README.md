@@ -60,8 +60,9 @@ python -m benchmarks.run --real-pointcloud "real scan A=/path/to/scan.npy"
 Only the label is written to the results: no paths, no coordinates, no field names,
 nothing but the point count, the realised neighbour density and the timings. `.npy`
 files holding an `(N, 3)` array (or a structured array with `x`/`y`/`z` fields) work
-anywhere; other formats are handed to `abyss.bedrock.io.convenience.easy_load`, which
-is imported lazily and is not a dependency of anything here.
+anywhere; any other format needs `--pointcloud-loader some.module:function`, a
+callable taking the path and returning such an array, imported lazily so that
+site-specific formats never become a dependency of anything here.
 
 ## The pieces
 

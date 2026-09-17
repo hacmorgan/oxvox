@@ -325,16 +325,22 @@ impl OxVoxNNSEngine {
         let search_points = search_points.as_array();
 
         // Building the index is a heavy, purely-Rust operation, so let other Python
-        // threads run in the meantime
+        // threads run in the meantime. It runs on a pool made for this call rather
+        // than rayon's global pool: the global pool's threads do not survive `fork`, so
+        // a child process (e.g. multiprocessing on Linux) building an index after its
+        // parent had used rayon would otherwise wait forever on threads that don't exist
         let backend = py.detach(|| {
-            Backend::build(
-                method,
-                search_points,
-                max_dist,
-                cells_per_radius,
-                subtree_threshold,
-                graph_degree,
-            )
+            let pool = _build_thread_pool(0);
+            pool.install(|| {
+                Backend::build(
+                    method,
+                    search_points,
+                    max_dist,
+                    cells_per_radius,
+                    subtree_threshold,
+                    graph_degree,
+                )
+            })
         })?;
 
         Ok(OxVoxNNSEngine {

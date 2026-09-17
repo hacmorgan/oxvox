@@ -64,10 +64,13 @@
   and maximum points per cell, both cheap to compute before building) bought two points
   of hit rate and a worse worst case, so none ships; `python -m benchmarks.heuristic`
   re-scores the rule against the recorded results.
-- README documents that a rayon thread pool does not survive `fork`: a process that has
-  already run an oxvox query cannot run one in a child created by `multiprocessing`'s
-  default start method on Linux (the child waits on worker threads that do not exist).
-  Use the `"spawn"` start method, or keep every oxvox call in the children.
+
+### Fixed
+- Building an index in a process forked from one that had already used oxvox hung
+  forever: index builds ran on rayon's global thread pool, whose threads do not survive
+  `fork`. Builds now run on a per-call pool like queries already did, so `OxVoxNNS`
+  works under `multiprocessing`'s default `fork` start method on Linux. Found by the
+  benchmark harness, covered by a regression test.
 
 ### Changed
 - **The voxel grid is no longer the method to reach for, and the benchmark says so.**

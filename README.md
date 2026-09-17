@@ -149,14 +149,11 @@ takes an `epsilon`: once `num_neighbours` neighbours closer than `epsilon` have 
 found for a query point, its search stops early, which can help avoid getting bogged
 down in very dense regions of the search points (results are then approximate).
 
-### A note on `fork`
-Queries run on a rayon thread pool, and thread pools do not survive `fork`. In a process
-that has already run an oxvox query, a child process created by `multiprocessing`'s
-default `fork` start method on Linux cannot run one: its first parallel operation waits
-on worker threads that do not exist in the child, forever. If you want to query from
-several processes, either use the `"spawn"` start method
-(`multiprocessing.get_context("spawn")`), or keep every oxvox call in the child
-processes and none in the parent.
+### Multiprocessing
+Every call (index build and query) runs on its own rayon thread pool created for that
+call, so `OxVoxNNS` objects can be built and queried in child processes created with
+any `multiprocessing` start method, including the default `fork` on Linux, and pickled
+across process boundaries.
 
 The exact methods (`voxel`, `kdtree`, `hybrid`) return identical results up to tie
 ordering; they are tested against a brute-force reference and against each other.

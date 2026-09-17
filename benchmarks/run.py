@@ -24,13 +24,14 @@ the next smaller query batch and skips the ones that would take longer than
 4M-point configurations alone would run for hours.
 
 Real pointclouds are passed as `--real-pointcloud "real scan A=/path/to/cloud"`. Only
-the label reaches the results, never the path, and `.bin` files are read through
-`abyss.bedrock.io.convenience.easy_load` when that package happens to be importable;
-`.npy` files holding an (N, 3) array or a structured array with x/y/z fields work
-anywhere.
+the label reaches the results, never the path. `.npy` files holding an (N, 3) array or
+a structured array with x/y/z fields are read natively; any other format needs
+`--pointcloud-loader some.module:function`, a callable taking the path and returning
+such an array, so site-specific formats never have to be known here.
 """
 
 import argparse
+import importlib
 import logging
 import sys
 import time
@@ -74,30 +75,32 @@ CALIBRATION_MAX_ITERATIONS = 10
 CALIBRATION_SAMPLE_SIZE = 2048
 
 
-def load_pointcloud(path: Path) -> npt.NDArray[np.float32]:
+def load_pointcloud(path: Path, loader: str | None = None) -> npt.NDArray[np.float32]:
     """
     Load a pointcloud from disk as an (N, 3) float32 array
 
     Args:
         path: File to load. `.npy` holds either an (N, 3) array or a structured array
-            with x/y/z fields; anything else is handed to
-            `abyss.bedrock.io.convenience.easy_load`, which is imported lazily so that
-            it is never a dependency of the benchmark
+            with x/y/z fields
+        loader: For any other format, `module.path:function` naming a callable that
+            takes the path and returns such an array. Imported lazily, so it is never a
+            dependency of the benchmark
 
     Returns:
         The points, as the engines want them
     """
-    if path.suffix == ".npy":
+    if loader is not None:
+        module_name, _, function_name = loader.partition(":")
+        if not module_name or not function_name:
+            raise SystemExit(f"--pointcloud-loader must look like module.path:function, got {loader!r}")
+        array = getattr(importlib.import_module(module_name), function_name)(str(path))
+    elif path.suffix == ".npy":
         array = np.load(path)
     else:
-        try:
-            from abyss.bedrock.io.convenience import easy_load
-        except ImportError as error:
-            raise SystemExit(
-                f"cannot read {path.suffix} pointclouds without abyss.bedrock "
-                f"(convert to .npy first): {error}"
-            ) from error
-        array = easy_load(str(path))
+        raise SystemExit(
+            f"cannot read {path.suffix} pointclouds natively; convert to .npy or pass "
+            "--pointcloud-loader module.path:function"
+        )
 
     if array.dtype.names is not None:
         array = np.stack([array["x"], array["y"], array["z"]], axis=1)
@@ -306,6 +309,16 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help="a real pointcloud to benchmark; only LABEL is written to the results",
     )
     parser.add_argument(
+        "--pointcloud-loader",
+        default=None,
+        metavar="MODULE:FUNCTION",
+        help=(
+            "For real pointclouds that are not .npy: a callable, given as "
+            "module.path:function, that takes the file path and returns an (N, 3) array "
+            "or a structured array with x/y/z fields"
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path(__file__).resolve().parent / "results",
@@ -385,7 +398,7 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
     for label, path in arguments.real_pointclouds:
-        real_points = load_pointcloud(path)
+        real_points = load_pointcloud(path, loader=arguments.pointcloud_loader)
         logger.info("loaded %s: %d points", label, len(real_points))
         sizes = [len(real_points)]
         if not arguments.quick and len(real_points) > REAL_SUBSAMPLE_SIZE:

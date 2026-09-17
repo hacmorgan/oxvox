@@ -6,7 +6,7 @@ use ndarray::Array2;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::types::{PyBytes, PyBytesMethods, PyDict, PyDictMethods, PyModule, PyModuleMethods};
-use pyo3::{pyclass, pyfunction, pymethods, pymodule, wrap_pyfunction, Bound, PyResult, Python};
+use pyo3::{Bound, PyResult, Python, pyclass, pyfunction, pymethods, pymodule, wrap_pyfunction};
 use serde::{Deserialize, Serialize};
 
 mod nns;

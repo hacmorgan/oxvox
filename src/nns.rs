@@ -4,7 +4,7 @@ use std::collections::{BinaryHeap, HashMap};
 use indicatif::ParallelProgressIterator;
 
 use ndarray::parallel::prelude::*;
-use ndarray::{s, Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1, Axis, s};
 
 struct Neighbour {
     search_point_idx: i32,

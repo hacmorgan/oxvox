@@ -171,6 +171,17 @@ def test_count_neighbours_randomised_brute_force() -> None:
         points[:, None, :] - points[None, :, :], axis=-1
     ).astype(np.float32)
 
+    # The plain (unweighted) count must match the brute-force count exactly, and p=0
+    # must reproduce it exactly too, despite the two paths comparing distances
+    # differently internally (squared distances vs sqrt'd distances)
+    expected_plain_counts = np.sum(distances < search_radius, axis=1)
+    plain_counts = nns.count_neighbours(points, distance_weight_factor=None)
+    zero_weighted_counts = nns.count_neighbours(points, distance_weight_factor=0.0)
+    assert plain_counts.dtype == np.uint32
+    assert np.array_equal(plain_counts, expected_plain_counts)
+    assert np.array_equal(zero_weighted_counts, expected_plain_counts)
+
+    # Weighted sums must match the brute-force kernel for several exponents
     for distance_weight_factor in (0.5, 1.0, 2.0):
         expected = np.sum(
             np.clip(1 - distances / search_radius, 0, None) ** distance_weight_factor
@@ -181,3 +192,34 @@ def test_count_neighbours_randomised_brute_force() -> None:
             points, distance_weight_factor=distance_weight_factor
         )
         assert np.allclose(actual, expected, atol=1e-3, rtol=1e-4)
+
+
+def test_count_neighbours_plain_count_clustered_and_negative_coords() -> None:
+    """
+    Regression test for the plain count on a harder distribution: dense Gaussian
+    clusters straddling the origin planes (negative and positive coordinates), which
+    exercises many voxels and the voxel-neighbourhood logic, checked exactly against a
+    brute-force reference
+    """
+    rng = np.random.default_rng(seed=1)
+    cluster_centres = rng.uniform(-1.0, 1.0, size=(5, 3)).astype(np.float32)
+    points = np.concatenate(
+        [
+            centre + rng.normal(scale=0.05, size=(400, 3)).astype(np.float32)
+            for centre in cluster_centres
+        ]
+    )
+    search_radius = 0.04
+    query_points = points[::3]
+
+    nns = OxVoxNNS(points, search_radius)
+    counts = nns.count_neighbours(query_points, distance_weight_factor=None)
+
+    distances = np.linalg.norm(
+        query_points[:, None, :] - points[None, :, :], axis=-1
+    ).astype(np.float32)
+    expected_counts = np.sum(distances < search_radius, axis=1)
+
+    assert np.array_equal(counts, expected_counts)
+    # Sanity: the clusters are dense enough that this isn't a trivial all-ones test
+    assert counts.max() > 5

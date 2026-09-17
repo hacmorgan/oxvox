@@ -13,6 +13,8 @@ Subsequent compilations should be much shorter
 """
 
 
+import pickle
+
 import numpy as np
 import numpy.lib.recfunctions as rf
 import pytest
@@ -192,6 +194,38 @@ def test_count_neighbours_randomised_brute_force() -> None:
             points, distance_weight_factor=distance_weight_factor
         )
         assert np.allclose(actual, expected, atol=1e-3, rtol=1e-4)
+
+
+def test_pickle_roundtrip_preserves_query_results() -> None:
+    """
+    Pickling and unpickling an OxVoxNNS must be transparent: querying the unpickled
+    object must give exactly the same results as querying the original, for both
+    find_neighbours and count_neighbours
+
+    This is the closest thing we have to a regression test for the pyo3 0.29 Bound-API
+    migration, since __getstate__/__setstate__/__getnewargs__ are the least-exercised
+    and most-changed surface in that migration
+    """
+    rng = np.random.default_rng(seed=2)
+    search_points = rng.random((200, 3), dtype=np.float32)
+    query_points = rng.random((50, 3), dtype=np.float32)
+    search_radius = 0.2
+
+    nns = OxVoxNNS(search_points, search_radius)
+    unpickled_nns = pickle.loads(pickle.dumps(nns))
+
+    original_indices, original_distances = nns.find_neighbours(query_points, 5)
+    unpickled_indices, unpickled_distances = unpickled_nns.find_neighbours(
+        query_points, 5
+    )
+    assert np.array_equal(original_indices, unpickled_indices)
+    assert np.array_equal(original_distances, unpickled_distances)
+
+    original_counts = nns.count_neighbours(query_points, distance_weight_factor=1.0)
+    unpickled_counts = unpickled_nns.count_neighbours(
+        query_points, distance_weight_factor=1.0
+    )
+    assert np.array_equal(original_counts, unpickled_counts)
 
 
 def test_count_neighbours_plain_count_clustered_and_negative_coords() -> None:

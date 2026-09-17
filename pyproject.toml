@@ -1,17 +1,36 @@
 [build-system]
-requires = ["maturin>=1.4,<2.0"]
+requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "oxvox"
-requires-python = ">=3.8"
+description = "Performant operations on array & pointcloud data, written in Rust"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
 ]
 dynamic = ["version"]
-dependencies = ["numpy", "numpy-indexed", "pytest"]
+dependencies = ["numpy", "numpy-indexed"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+bench = ["scipy", "open3d", "plotly"]
+
+[project.urls]
+Homepage = "https://github.com/hacmorgan/oxvox"
+Repository = "https://github.com/hacmorgan/oxvox"
+Issues = "https://github.com/hacmorgan/oxvox/issues"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

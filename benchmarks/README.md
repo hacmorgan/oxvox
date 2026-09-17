@@ -13,7 +13,7 @@ built from them.
 pip install -e ".[bench]"                                # scipy, open3d, plotly
 maturin develop --release --features kiddo-baseline      # adds method="kiddo"
 python -m benchmarks.run --quick                         # smoke grid, a few minutes
-python -m benchmarks.run                                 # the full grid, a few hours
+python -m benchmarks.run                                 # the full grid, about two hours
 python -m benchmarks.report                              # results/report.html
 python -m benchmarks.heuristic                           # score the method="auto" rule
 ```
@@ -31,6 +31,25 @@ very dense regime and collapse the density axis. The real scans keep physical ra
 
 The `kiddo-baseline` feature is optional: without it the `kiddo` backend is simply
 absent from the grid, as are scipy and Open3D if they are not installed.
+
+## How the committed results were produced
+
+On 20 cores, in two passes (the second with tighter limits, to keep the whole thing
+inside two hours; every file records the limits it ran under in its `options` key):
+
+```bash
+# the uniform family, with the full query-batch ladder up to 4e6 and a 60 s cap
+python -m benchmarks.run --dataset uniform
+
+# every other family plus the real scans, capped at 1e6 queries and 20 s per run
+python -m benchmarks.run \
+    --dataset clusters --dataset cylinder --dataset sheet --dataset scene \
+    --real-pointcloud "real scan A=<path>" --real-pointcloud "real scan B=<path>" \
+    --max-run-seconds 20 --max-queries 1000000
+```
+
+The real scans are two 16M-point laser scans that are not public; only their labels,
+point counts, realised neighbour densities and timings are in the results.
 
 ## Real pointclouds
 

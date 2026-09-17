@@ -2,8 +2,8 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 
 use bincode::{deserialize, serialize};
+use ndarray::Array1;
 use ndarray::Array2;
-use ndarray::{Array1, ShapeBuilder};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::types::{PyBytes, PyDict, PyModule};
 use pyo3::{pyclass, pyfunction, pymethods, pymodule, wrap_pyfunction, IntoPy, PyResult, Python};

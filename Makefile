@@ -21,5 +21,18 @@ help: # Show help for each of the Makefile recipes.
 test-python: # Run python tests
 	@python -m pytest --verbose --ignore=third_party python/oxvox/tests
 
-test: # Run all tests
+test-rust: # Run rust unit tests
+	@cargo test
+
+test: # Run all tests (rust unit tests, then python tests)
+	@make test-rust
 	@make test-python
+
+
+###############
+# Linting
+###############
+
+lint: # Check rust formatting and run clippy with warnings denied
+	@cargo fmt --check
+	@cargo clippy --all-targets -- -D warnings

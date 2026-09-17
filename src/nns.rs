@@ -6,6 +6,17 @@ use indicatif::ParallelProgressIterator;
 use ndarray::parallel::prelude::*;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1, Axis, s};
 
+/// Mapping from voxel coordinates to the indices of points inside that voxel
+pub type VoxelIndex = HashMap<(i32, i32, i32), Vec<i32>>;
+
+/// One query voxel's worth of found-neighbours output (indices, distances), tagged
+/// with the voxel coordinates it belongs to
+type FindNeighboursChunk = ((Array2<i32>, Array2<f32>), (i32, i32, i32));
+
+/// One query voxel's worth of neighbour-count output, tagged with the voxel
+/// coordinates it belongs to
+type CountNeighboursChunk = (Array1<f32>, (i32, i32, i32));
+
 struct Neighbour {
     search_point_idx: i32,
     distance: f32,
@@ -48,10 +59,7 @@ impl PartialEq for Neighbour {
 ///     Voxel coordinate offsets for the shell of voxels surrounding a given voxel
 ///     Triangulation point coordinates
 ///     Distance from each search point to triangulation points
-pub fn initialise_nns(
-    search_points: &Array2<f32>,
-    max_dist: f32,
-) -> (HashMap<(i32, i32, i32), Vec<i32>>, Array2<i32>) {
+pub fn initialise_nns(search_points: &Array2<f32>, max_dist: f32) -> (VoxelIndex, Array2<i32>) {
     // Group point indices by voxel into a hashmap indexed by voxel coordinates
     let points_by_voxel = _group_by_voxel(search_points.view(), max_dist);
 
@@ -79,7 +87,7 @@ pub fn initialise_nns(
 pub fn find_neighbours(
     query_points: ArrayView2<f32>,
     search_points: &Array2<f32>,
-    search_points_by_voxel: &HashMap<(i32, i32, i32), Vec<i32>>,
+    search_points_by_voxel: &VoxelIndex,
     voxel_offsets: &Array2<i32>,
     num_neighbours: i32,
     max_dist: f32,
@@ -94,7 +102,7 @@ pub fn find_neighbours(
 
     // Zip search points, query points, and output array chunks together, to be
     // processed in parallel
-    let processed_chunks: Vec<((Array2<i32>, Array2<f32>), (i32, i32, i32))> = keys
+    let processed_chunks: Vec<FindNeighboursChunk> = keys
         .clone()
         .into_par_iter()
         .progress_count(keys.len() as u64)
@@ -127,7 +135,7 @@ pub fn find_neighbours(
     processed_chunks
         .iter()
         .for_each(|((chunk_indices, chunk_distances), voxel)| {
-            let query_point_indices = query_points_by_voxel.get(&voxel).unwrap();
+            let query_point_indices = query_points_by_voxel.get(voxel).unwrap();
             query_point_indices
                 .iter()
                 .map(|&idx| idx as usize)
@@ -145,12 +153,18 @@ pub fn find_neighbours(
 }
 
 /// Run kNN search for all query points in a given voxel
+///
+/// n.b. this function's argument count is inherent to the (voxel, query lookup,
+/// search lookup, geometry) shape of the current single-voxel-grid backend; item 3's
+/// restructure into a shared `NeighbourIndex` trait removes most of these by carrying
+/// them on `self`
+#[allow(clippy::too_many_arguments)]
 fn _process_query_point_voxel(
     voxel: &(i32, i32, i32),
     query_points: &ArrayView2<f32>,
-    query_points_by_voxel: &HashMap<(i32, i32, i32), Vec<i32>>,
+    query_points_by_voxel: &VoxelIndex,
     search_points: &Array2<f32>,
-    search_points_by_voxel: &HashMap<(i32, i32, i32), Vec<i32>>,
+    search_points_by_voxel: &VoxelIndex,
     voxel_offsets: &Array2<i32>,
     num_neighbours: i32,
     max_dist: f32,
@@ -204,7 +218,7 @@ fn _process_query_point_voxel(
 fn _get_neighbouring_search_points(
     voxel: &(i32, i32, i32),
     search_points: &Array2<f32>,
-    search_points_by_voxel: &HashMap<(i32, i32, i32), Vec<i32>>,
+    search_points_by_voxel: &VoxelIndex,
     voxel_offsets: &Array2<i32>,
 ) -> (Array2<f32>, Vec<i32>) {
     // Construct an iterator of our neighbouring voxels
@@ -266,12 +280,17 @@ fn _get_neighbouring_search_points(
 ///     num_neighbours:
 ///     max_dist:
 ///     epsilon:
+///
+/// n.b. argument count is inherent to this backend's per-candidate signature (query,
+/// two output rows, search geometry, three scalar parameters); see the note on
+/// `_process_query_point_voxel` above
+#[allow(clippy::too_many_arguments)]
 fn _find_query_point_neighbours(
     query_point: ArrayView1<f32>,
     mut indices_row: ArrayViewMut1<i32>,
     mut distances_row: ArrayViewMut1<f32>,
     search_points: &Array2<f32>,
-    search_point_indices: &Vec<i32>,
+    search_point_indices: &[i32],
     num_neighbours: i32,
     max_dist: f32,
     epsilon: f32,
@@ -336,7 +355,7 @@ fn _find_query_point_neighbours(
 pub fn count_neighbours(
     query_points: ArrayView2<f32>,
     search_points: &Array2<f32>,
-    search_points_by_voxel: &HashMap<(i32, i32, i32), Vec<i32>>,
+    search_points_by_voxel: &VoxelIndex,
     voxel_offsets: &Array2<i32>,
     max_dist: f32,
     distance_weight_factor: Option<f32>,
@@ -354,7 +373,7 @@ pub fn count_neighbours(
 
     // Zip search points, query points, and output array chunks together, to be
     // processed in parallel
-    let processed_chunks: Vec<(Array1<f32>, (i32, i32, i32))> = keys
+    let processed_chunks: Vec<CountNeighboursChunk> = keys
         .clone()
         .into_par_iter()
         .progress_count(keys.len() as u64)
@@ -377,7 +396,7 @@ pub fn count_neighbours(
 
     // Insert values from processed voxel chunks back into output array
     processed_chunks.iter().for_each(|(chunk_counts, voxel)| {
-        let query_point_indices = query_points_by_voxel.get(&voxel).unwrap();
+        let query_point_indices = query_points_by_voxel.get(voxel).unwrap();
         query_point_indices
             .iter()
             .map(|&idx| idx as usize)
@@ -391,12 +410,16 @@ pub fn count_neighbours(
 }
 
 /// Run rNN count for all query points in a given voxel
+///
+/// n.b. see the note on `_process_query_point_voxel` above; this function's argument
+/// count is inherent to the same backend shape
+#[allow(clippy::too_many_arguments)]
 fn _count_query_point_voxel(
     voxel: &(i32, i32, i32),
     query_points: &ArrayView2<f32>,
-    query_points_by_voxel: &HashMap<(i32, i32, i32), Vec<i32>>,
+    query_points_by_voxel: &VoxelIndex,
     search_points: &Array2<f32>,
-    search_points_by_voxel: &HashMap<(i32, i32, i32), Vec<i32>>,
+    search_points_by_voxel: &VoxelIndex,
     voxel_offsets: &Array2<i32>,
     max_dist: f32,
     distance_weight_factor: Option<f32>,
@@ -515,10 +538,7 @@ fn _count_query_point_neighbours(
 /// While we're here, we compute distances to the triangulation points
 ///
 /// This is the second pass through the points we will make
-fn _group_by_voxel(
-    search_points: ArrayView2<f32>,
-    voxel_size: f32,
-) -> HashMap<(i32, i32, i32), Vec<i32>> {
+fn _group_by_voxel(search_points: ArrayView2<f32>, voxel_size: f32) -> VoxelIndex {
     // Construct mapping from voxel coords to point indices
     let mut points_by_voxel = HashMap::new();
 
@@ -555,4 +575,23 @@ fn _compute_voxel_offsets() -> Array2<i32> {
         }
     }
     voxel_offsets
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The 27-cell neighbourhood (3x3x3, including the centre voxel itself) must have
+    /// exactly 27 rows, one of which is the zero offset (0, 0, 0)
+    #[test]
+    fn voxel_offsets_cover_the_27_cell_neighbourhood() {
+        let voxel_offsets = _compute_voxel_offsets();
+
+        assert_eq!(voxel_offsets.shape(), &[27, 3]);
+        assert!(
+            voxel_offsets
+                .axis_iter(Axis(0))
+                .any(|row| row[0] == 0 && row[1] == 0 && row[2] == 0)
+        );
+    }
 }

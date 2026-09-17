@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use bincode::{deserialize, serialize};
 use ndarray::Array1;
 use ndarray::Array2;
@@ -11,12 +9,15 @@ use serde::{Deserialize, Serialize};
 
 mod nns;
 
+/// Indices and distances of a query's found neighbours, as returned to Python
+type NeighbourArrays<'py> = (Bound<'py, PyArray2<i32>>, Bound<'py, PyArray2<f32>>);
+
 #[derive(Serialize, Deserialize)]
 #[pyclass(module = "oxvox")] // module = "blah" required for python to serialise correctly
 struct OxVoxNNSEngine {
-    search_points: Array2<f32>,                          // (N, 3)
-    points_by_voxel: HashMap<(i32, i32, i32), Vec<i32>>, // maps voxel_coords -> indices of search points in that voxel
-    voxel_offsets: Array2<i32>,                          // (27, 3)
+    search_points: Array2<f32>,       // (N, 3)
+    points_by_voxel: nns::VoxelIndex, // maps voxel_coords -> indices of search points in that voxel
+    voxel_offsets: Array2<i32>,       // (27, 3)
     max_dist: f32,
 }
 
@@ -126,7 +127,7 @@ impl OxVoxNNSEngine {
         num_neighbours: i32,
         num_threads: usize,
         epsilon: f32,
-    ) -> PyResult<(Bound<'py, PyArray2<i32>>, Bound<'py, PyArray2<f32>>)> {
+    ) -> PyResult<NeighbourArrays<'py>> {
         // Convert query points to rust ndarray
         let query_points = query_points.as_array();
 
@@ -176,12 +177,12 @@ impl OxVoxNNSEngine {
     ) -> PyResult<Bound<'py, PyArray1<f32>>> {
         // A negative weighting factor doesn't correspond to a sensible kernel, so reject
         // it here, before it ever reaches the engine
-        if let Some(p) = distance_weight_factor {
-            if p < 0.0 {
-                return Err(PyValueError::new_err(
-                    "distance_weight_factor must be non-negative",
-                ));
-            }
+        if let Some(p) = distance_weight_factor
+            && p < 0.0
+        {
+            return Err(PyValueError::new_err(
+                "distance_weight_factor must be non-negative",
+            ));
         }
 
         // Convert query points to rust ndarray

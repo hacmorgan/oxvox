@@ -88,6 +88,40 @@ def _format_count(value: float) -> str:
     return f"{value:g}"
 
 
+def column_label(plan: dict[str, Any]) -> str:
+    """
+    Short label for the grid column a radius forms
+
+    Synthetic radii are chosen to hit a density target, which is comparable across
+    datasets and point counts, so the target names the column. The real scans' radii
+    are physical lengths with no target, so the length names the column instead
+
+    Args:
+        plan: One entry of a results file's `radius_plans`
+
+    Returns:
+        The column label
+    """
+    if plan["density_target"] > 0:
+        return f"~{plan['density_target']:g} per sphere"
+    return f"r = {plan['radius']:g} m"
+
+
+def column_sort_key(plan: dict[str, Any]) -> tuple[int, float]:
+    """
+    Sort key putting the density-target columns first, each group ascending
+
+    Args:
+        plan: One entry of a results file's `radius_plans`
+
+    Returns:
+        The sort key
+    """
+    if plan["density_target"] > 0:
+        return (0, plan["density_target"])
+    return (1, plan["radius"])
+
+
 class ReportModel:
     """
     Everything the report shows, extracted from the raw results once
@@ -119,9 +153,16 @@ class ReportModel:
             group["dataset"]["label"]: group["dataset"]["description"] for group in groups
         }
 
-        # (dataset, num_points, density_target) -> realised mean neighbours per sphere
+        # Every measurement is keyed by its search radius rather than by the density
+        # target it was chosen for: the real scans' radii are physical lengths with no
+        # density target at all, so the targets are not unique within a group
+        # (dataset, num_points, radius) -> realised mean neighbours per sphere
         self.realised_density: dict[tuple[str, int, float], float | None] = {}
-        # (dataset, num_points, density_target, k, num_queries, competitor) -> seconds
+        # (dataset, num_points, radius) -> the label this radius forms a column under
+        self.column_label: dict[tuple[str, int, float], str] = {}
+        # Column label -> sort key, so the selector lists columns in a sane order
+        self.column_order: dict[str, tuple[int, float]] = {}
+        # (dataset, num_points, radius, k, num_queries, competitor) -> seconds
         self.find_seconds: dict[tuple[str, int, float, int, int, str], float] = {}
         self.count_seconds: dict[tuple[str, int, float, int, str], float] = {}
         self.build_seconds: dict[tuple[str, int, float, str], float] = {}
@@ -142,12 +183,15 @@ class ReportModel:
             dataset = group["dataset"]["label"]
             num_points = group["dataset"]["num_points"]
             for plan in group["radius_plans"]:
-                self.realised_density[(dataset, num_points, plan["density_target"])] = plan[
+                self.realised_density[(dataset, num_points, plan["radius"])] = plan[
                     "realised_points_per_sphere"
                 ]
+                label = column_label(plan)
+                self.column_label[(dataset, num_points, plan["radius"])] = label
+                self.column_order[label] = column_sort_key(plan)
 
             for record in group["runs"]:
-                density = record["density_target"]
+                radius = record["radius"]
                 competitor = record["competitor"]
                 workload = record["workload"]
                 status = record.get("status")
@@ -157,7 +201,10 @@ class ReportModel:
                         {
                             "dataset": dataset,
                             "num_points": num_points,
-                            "density_target": density,
+                            "radius": radius,
+                            "column": self.column_label.get(
+                                (dataset, num_points, radius), f"r = {radius:.4g}"
+                            ),
                             "competitor": competitor,
                             "workload": workload,
                             "num_neighbours": record.get("num_neighbours", 0),
@@ -169,11 +216,11 @@ class ReportModel:
                     continue
 
                 if workload == "build":
-                    self.build_seconds[(dataset, num_points, density, competitor)] = record[
+                    self.build_seconds[(dataset, num_points, radius, competitor)] = record[
                         "build_seconds"
                     ]
                     if "added_rss_mb" in record:
-                        self.added_rss_mb[(dataset, num_points, density, competitor)] = record[
+                        self.added_rss_mb[(dataset, num_points, radius, competitor)] = record[
                             "added_rss_mb"
                         ]
                 elif workload == "find":
@@ -181,7 +228,7 @@ class ReportModel:
                         (
                             dataset,
                             num_points,
-                            density,
+                            radius,
                             record["num_neighbours"],
                             record["num_queries"],
                             competitor,
@@ -189,22 +236,22 @@ class ReportModel:
                     ] = record["query_seconds"]
                 elif workload == "count":
                     self.count_seconds[
-                        (dataset, num_points, density, record["num_queries"], competitor)
+                        (dataset, num_points, radius, record["num_queries"], competitor)
                     ] = record["query_seconds"]
                 elif workload == "check":
                     correctness = record["correctness"]
-                    key = (dataset, num_points, density, record["num_neighbours"], competitor)
+                    key = (dataset, num_points, radius, record["num_neighbours"], competitor)
                     self.recall[key] = correctness["distance_recall"]
                     self.index_agreement[key] = correctness["index_agreement"]
                     self.max_distance_error[key] = correctness["max_distance_error"]
                 elif workload == "check-count":
-                    self.count_agreement[(dataset, num_points, density, competitor)] = record[
+                    self.count_agreement[(dataset, num_points, radius, competitor)] = record[
                         "correctness"
                     ]["count_agreement"]
 
     def grid_points(self) -> list[tuple[str, int, float, int, int]]:
         """
-        Every `(dataset, N, density target, k, Q)` the kNN workload was measured at
+        Every `(dataset, N, radius, k, Q)` the kNN workload was measured at
 
         Returns:
             The grid points, in a stable order
@@ -221,7 +268,7 @@ class ReportModel:
         The fastest exact method at one grid point
 
         Args:
-            grid_point: `(dataset, N, density target, k, Q)`
+            grid_point: `(dataset, N, radius, k, Q)`
 
         Returns:
             The competitor key and its query time, or None if nothing exact ran there
@@ -243,7 +290,7 @@ class ReportModel:
         How many times faster than the reference a competitor was at a grid point
 
         Args:
-            grid_point: `(dataset, N, density target, k, Q)`
+            grid_point: `(dataset, N, radius, k, Q)`
             competitor: Competitor key
 
         Returns:
@@ -281,22 +328,27 @@ class ReportModel:
         """
         dataset_index = {label: number for number, label in enumerate(self.dataset_labels)}
         competitor_index = {key: number for number, key in enumerate(self.competitors)}
+        columns = sorted(self.column_order, key=lambda label: self.column_order[label])
+        column_index = {label: number for number, label in enumerate(columns)}
+
+        def column_of(dataset: str, num_points: int, radius: float) -> int:
+            return column_index[self.column_label[(dataset, num_points, radius)]]
 
         find_rows = [
             [
                 dataset_index[dataset],
                 num_points,
-                density,
+                column_of(dataset, num_points, radius),
                 num_neighbours,
                 num_queries,
                 competitor_index[competitor],
                 round(seconds, 6),
-                round(self.build_seconds.get((dataset, num_points, density, competitor), 0.0), 6),
+                round(self.build_seconds.get((dataset, num_points, radius, competitor), 0.0), 6),
             ]
             for (
                 dataset,
                 num_points,
-                density,
+                radius,
                 num_neighbours,
                 num_queries,
                 competitor,
@@ -306,33 +358,46 @@ class ReportModel:
             [
                 dataset_index[dataset],
                 num_points,
-                density,
+                column_of(dataset, num_points, radius),
                 num_queries,
                 competitor_index[competitor],
                 round(seconds, 6),
             ]
-            for (dataset, num_points, density, num_queries, competitor), seconds in sorted(
+            for (dataset, num_points, radius, num_queries, competitor), seconds in sorted(
                 self.count_seconds.items()
             )
         ]
         recall_rows = [
-            [dataset_index[dataset], num_points, density, num_neighbours, round(value, 4)]
+            [
+                dataset_index[dataset],
+                num_points,
+                column_of(dataset, num_points, radius),
+                num_neighbours,
+                round(value, 4),
+            ]
             for (
                 dataset,
                 num_points,
-                density,
+                radius,
                 num_neighbours,
                 competitor,
             ), value in sorted(self.recall.items())
             if not self.competitor_specs[competitor]["exact"]
         ]
         realised_rows = [
-            [dataset_index[dataset], num_points, density, round(value, 2) if value else None]
-            for (dataset, num_points, density), value in sorted(self.realised_density.items())
+            [
+                dataset_index[dataset],
+                num_points,
+                column_of(dataset, num_points, radius),
+                round(value, 2) if value is not None else None,
+                round(radius, 5),
+            ]
+            for (dataset, num_points, radius), value in sorted(self.realised_density.items())
         ]
 
         return {
             "datasets": self.dataset_labels,
+            "columns": columns,
             "descriptions": [self.descriptions[label] for label in self.dataset_labels],
             "competitors": [
                 {
@@ -500,7 +565,7 @@ def render_winner_table(model: ReportModel) -> str:
     """
     rows: list[str] = []
     for grid_point in model.grid_points():
-        dataset, num_points, density, num_neighbours, num_queries = grid_point
+        dataset, num_points, radius, num_neighbours, num_queries = grid_point
         candidates = sorted(
             (model.find_seconds[(*grid_point, competitor)], competitor)
             for competitor in model.exact_competitors
@@ -511,14 +576,18 @@ def render_winner_table(model: ReportModel) -> str:
         best_seconds, best = candidates[0]
         runner_up = candidates[1] if len(candidates) > 1 else None
         speed_up = model.speed_up(grid_point, best)
-        realised = model.realised_density.get((dataset, num_points, density))
+        realised = model.realised_density.get((dataset, num_points, radius))
         rows.append(
             "<tr data-dataset=\"{dataset}\">"
             "<td>{dataset}</td><td>{points}</td><td>{density}</td><td>{k}</td><td>{queries}</td>"
             "<td>{winner}</td><td>{time}</td><td>{margin}</td><td>{speed_up}</td></tr>".format(
                 dataset=html.escape(dataset),
                 points=_format_count(num_points),
-                density=(f"{realised:.3g}" if realised is not None else f"~{density:g}"),
+                density=(
+                    f"{realised:.3g}"
+                    if realised is not None
+                    else html.escape(model.column_label[(dataset, num_points, radius)])
+                ),
                 k=num_neighbours,
                 queries=_format_count(num_queries),
                 winner=html.escape(
@@ -608,12 +677,12 @@ def render_skipped_table(model: ReportModel) -> str:
     if not model.skipped:
         return "<p>Every configuration in the grid was measured.</p>"
     rows = "".join(
-        "<tr><td>{dataset}</td><td>{points}</td><td>~{density:g}</td><td>{competitor}</td>"
+        "<tr><td>{dataset}</td><td>{points}</td><td>{column}</td><td>{competitor}</td>"
         "<td>{workload}</td><td>{k}</td><td>{queries}</td><td>{status}</td>"
         "<td>{detail}</td></tr>".format(
             dataset=html.escape(entry["dataset"]),
             points=_format_count(entry["num_points"]),
-            density=entry["density_target"],
+            column=html.escape(entry["column"]),
             competitor=html.escape(entry["competitor"]),
             workload=html.escape(entry["workload"]),
             k=entry["num_neighbours"] or "-",
@@ -628,7 +697,7 @@ def render_skipped_table(model: ReportModel) -> str:
         "projected it past a time or memory limit (see the run's options in the results "
         "JSON).</p>"
         '<div class="table-scroll"><table><thead><tr><th>Dataset</th><th>N</th>'
-        "<th>Points per sphere</th><th>Implementation</th><th>Workload</th><th>k</th>"
+        "<th>Radius column</th><th>Implementation</th><th>Workload</th><th>k</th>"
         "<th>Queries</th><th>Status</th><th>Reason</th></tr></thead><tbody>"
         + rows
         + "</tbody></table></div>"
@@ -766,7 +835,7 @@ skipped as projected too slow &mdash; the skip table at the bottom says which.</
     </select>
   </label>
   <label>Neighbours (k)<select id="k"></select></label>
-  <label>Points per sphere<select id="density"></select></label>
+  <label>Radius column<select id="density"></select></label>
   <label>Query batch<select id="queries"></select></label>
 </div>
 <div class="panel-grid" id="time-grid"></div>
@@ -777,7 +846,7 @@ A method with a cheaper build wins the left of the chart however fast its querie
 the crossing point is the batch size above which the better query time takes over.</p>
 <div class="controls">
   <label>Cloud<select id="bq-group"></select></label>
-  <label>Points per sphere<select id="bq-density"></select></label>
+  <label>Radius column<select id="bq-density"></select></label>
   <label>Neighbours (k)<select id="bq-k"></select></label>
 </div>
 <div class="panel"><div id="build-plot" class="plot-wide"></div></div>
@@ -787,7 +856,7 @@ the crossing point is the batch size above which the better query time takes ove
 radius of each query, with no k bound at all. Open3D is absent because it exposes no
 count query. Log-log, one panel per dataset.</p>
 <div class="controls">
-  <label>Points per sphere<select id="count-density"></select></label>
+  <label>Radius column<select id="count-density"></select></label>
   <label>Query batch<select id="count-queries"></select></label>
 </div>
 <div class="panel-grid" id="count-grid"></div>
@@ -829,19 +898,19 @@ __SCRIPT__
 # Chart code. Kept out of the template above so that the braces of JavaScript never
 # have to be escaped for Python's string formatting
 REPORT_SCRIPT = r"""
-const FIND = { dataset: 0, n: 1, density: 2, k: 3, q: 4, competitor: 5, query: 6, build: 7 };
-const COUNT = { dataset: 0, n: 1, density: 2, q: 3, competitor: 4, query: 5 };
-const RECALL = { dataset: 0, n: 1, density: 2, k: 3, value: 4 };
+const FIND = { dataset: 0, n: 1, column: 2, k: 3, q: 4, competitor: 5, query: 6, build: 7 };
+const COUNT = { dataset: 0, n: 1, column: 2, q: 3, competitor: 4, query: 5 };
+const RECALL = { dataset: 0, n: 1, column: 2, k: 3, value: 4 };
 
 const uniqueSorted = (values) => [...new Set(values)].sort((a, b) => a - b);
 const formatCount = (value) =>
   value >= 1e6 ? `${value / 1e6}M` : value >= 1e3 ? `${value / 1e3}k` : `${value}`;
 
-/* The realised mean neighbours per sphere for a (dataset, N, density target) */
+/* The realised mean neighbours per sphere, and the radius, per (dataset, N, column) */
 const realisedLookup = new Map(
-  DATA.realised.map((row) => [`${row[0]}|${row[1]}|${row[2]}`, row[3]])
+  DATA.realised.map((row) => [`${row[0]}|${row[1]}|${row[2]}`, { density: row[3], radius: row[4] }])
 );
-const realised = (dataset, n, density) => realisedLookup.get(`${dataset}|${n}|${density}`);
+const realised = (dataset, n, column) => realisedLookup.get(`${dataset}|${n}|${column}`);
 
 function isDark() {
   const stamped = document.documentElement.dataset.theme;
@@ -907,14 +976,14 @@ function fillSelect(id, values, format, initial) {
   select.value = initial !== undefined ? initial : values[values.length - 1];
 }
 
-function densityLabel(density) {
-  return density === 0 ? "scan radii" : `~${density}`;
+function columnLabel(columnIndex) {
+  return DATA.columns[columnIndex];
 }
 
 function renderTimeGrid() {
   const metric = document.getElementById("metric").value;
   const wantedK = Number(document.getElementById("k").value);
-  const wantedDensity = Number(document.getElementById("density").value);
+  const wantedColumn = Number(document.getElementById("density").value);
   const wantedQueries = document.getElementById("queries").value;
   const container = document.getElementById("time-grid");
   container.innerHTML = "";
@@ -924,7 +993,7 @@ function renderTimeGrid() {
       (row) =>
         row[FIND.dataset] === datasetIndex &&
         row[FIND.k] === wantedK &&
-        row[FIND.density] === wantedDensity
+        row[FIND.column] === wantedColumn
     );
     if (!rows.length) return;
 
@@ -1004,13 +1073,17 @@ function renderTimeGrid() {
       });
     }
 
-    const density = realised(datasetIndex, sizes[0], wantedDensity);
+    const entry = realised(datasetIndex, sizes[0], wantedColumn);
     const panel = document.createElement("div");
     panel.className = "panel";
     panel.innerHTML =
       `<h3>${label}</h3>` +
       `<div class="meta" style="font-size:11px">${
-        density != null ? `${Number(density).toPrecision(3)} points per sphere at N=${formatCount(sizes[0])}` : ""
+        entry && entry.density != null
+          ? `${Number(entry.density).toPrecision(3)} points per sphere at N=${formatCount(
+              sizes[0]
+            )}, r = ${entry.radius} m`
+          : ""
       }</div>` +
       `<div class="plot" id="time-plot-${datasetIndex}"></div>`;
     container.appendChild(panel);
@@ -1033,13 +1106,13 @@ function groupKey(datasetIndex, n) {
 
 function renderBuildChart() {
   const [datasetIndex, n] = document.getElementById("bq-group").value.split(":").map(Number);
-  const density = Number(document.getElementById("bq-density").value);
+  const column = Number(document.getElementById("bq-density").value);
   const wantedK = Number(document.getElementById("bq-k").value);
   const rows = DATA.find.filter(
     (row) =>
       row[FIND.dataset] === datasetIndex &&
       row[FIND.n] === n &&
-      row[FIND.density] === density &&
+      row[FIND.column] === column &&
       row[FIND.k] === wantedK
   );
   const queries = uniqueSorted(rows.map((row) => row[FIND.q]));
@@ -1077,14 +1150,14 @@ function renderBuildChart() {
 /* ---------- count workload ---------- */
 
 function renderCountGrid() {
-  const density = Number(document.getElementById("count-density").value);
+  const column = Number(document.getElementById("count-density").value);
   const wantedQueries = document.getElementById("count-queries").value;
   const container = document.getElementById("count-grid");
   container.innerHTML = "";
 
   DATA.datasets.forEach((label, datasetIndex) => {
     const rows = DATA.count.filter(
-      (row) => row[COUNT.dataset] === datasetIndex && row[COUNT.density] === density
+      (row) => row[COUNT.dataset] === datasetIndex && row[COUNT.column] === column
     );
     if (!rows.length) return;
     const sizes = uniqueSorted(rows.map((row) => row[COUNT.n]));
@@ -1151,10 +1224,10 @@ function renderCountGrid() {
 function renderRecall() {
   const columns = [];
   const columnKeys = [];
-  uniqueSorted(DATA.recall.map((row) => row[RECALL.density])).forEach((density) => {
+  uniqueSorted(DATA.recall.map((row) => row[RECALL.column])).forEach((columnIndex) => {
     uniqueSorted(DATA.recall.map((row) => row[RECALL.k])).forEach((k) => {
-      columnKeys.push(`${density}|${k}`);
-      columns.push(`${densityLabel(density)} pts, k=${k}`);
+      columnKeys.push(`${columnIndex}|${k}`);
+      columns.push(`${columnLabel(columnIndex)}, k=${k}`);
     });
   });
   const rowKeys = [];
@@ -1170,15 +1243,15 @@ function renderRecall() {
 
   const lookup = new Map(
     DATA.recall.map((row) => [
-      `${row[RECALL.dataset]}|${row[RECALL.n]}|${row[RECALL.density]}|${row[RECALL.k]}`,
+      `${row[RECALL.dataset]}|${row[RECALL.n]}|${row[RECALL.column]}|${row[RECALL.k]}`,
       row[RECALL.value],
     ])
   );
   const z = rowKeys.map((rowKey) =>
     columnKeys.map((columnKey) => {
       const [datasetIndex, n] = rowKey.split("|");
-      const [density, k] = columnKey.split("|");
-      const value = lookup.get(`${datasetIndex}|${n}|${density}|${k}`);
+      const [columnIndex, k] = columnKey.split("|");
+      const value = lookup.get(`${datasetIndex}|${n}|${columnIndex}|${k}`);
       return value === undefined ? null : value;
     })
   );
@@ -1227,11 +1300,11 @@ function renderEverything() {
 
 function setUpControls() {
   const kValues = uniqueSorted(DATA.find.map((row) => row[FIND.k]));
-  const densities = uniqueSorted(DATA.find.map((row) => row[FIND.density]));
+  const columns = uniqueSorted(DATA.find.map((row) => row[FIND.column]));
   const queryValues = uniqueSorted(DATA.find.map((row) => row[FIND.q]));
 
   fillSelect("k", kValues, (value) => `k = ${value}`, kValues.includes(8) ? 8 : kValues[0]);
-  fillSelect("density", densities, densityLabel, densities.includes(10) ? 10 : densities[0]);
+  fillSelect("density", columns, columnLabel, columns.includes(1) ? 1 : columns[0]);
   const queriesSelect = document.getElementById("queries");
   queriesSelect.innerHTML =
     '<option value="max">largest measured</option>' +
@@ -1250,15 +1323,15 @@ function setUpControls() {
   const preferred = groups.find(([, label]) => label.startsWith("uniform @ 1M"));
   groupSelect.value = preferred ? preferred[0] : groups[0][0];
 
-  fillSelect("bq-density", densities, densityLabel, densities.includes(10) ? 10 : densities[0]);
+  fillSelect("bq-density", columns, columnLabel, columns.includes(1) ? 1 : columns[0]);
   fillSelect("bq-k", kValues, (value) => `k = ${value}`, kValues.includes(8) ? 8 : kValues[0]);
 
-  const countDensities = uniqueSorted(DATA.count.map((row) => row[COUNT.density]));
+  const countColumns = uniqueSorted(DATA.count.map((row) => row[COUNT.column]));
   fillSelect(
     "count-density",
-    countDensities,
-    densityLabel,
-    countDensities.includes(10) ? 10 : countDensities[0]
+    countColumns,
+    columnLabel,
+    countColumns.includes(1) ? 1 : countColumns[0]
   );
   const countQueries = uniqueSorted(DATA.count.map((row) => row[COUNT.q]));
   document.getElementById("count-queries").innerHTML =

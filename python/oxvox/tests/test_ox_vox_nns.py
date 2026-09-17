@@ -15,8 +15,6 @@ Subsequent compilations should be much shorter
 
 import pickle
 
-import pickle
-
 import numpy as np
 import pytest
 

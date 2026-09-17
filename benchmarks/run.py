@@ -9,9 +9,12 @@ given on the command line:
 
 - point counts N of 1e4, 1e5, 1e6 and 4e6 (real clouds run at their native size and at
   a 1e6 random subsample)
-- four search radii, chosen so that a sphere of that radius holds about 1, 10, 100 and
-  1000 points on a uniform cloud of the same size (real clouds use radii that mean
-  something for a laser scan instead: 1 cm, 5 cm and 20 cm)
+- four search radii, calibrated per cloud so that a sphere of that radius really holds
+  about 1, 10, 100 and 1000 of its points (the closed-form radius only works for the
+  uniform box: a cylinder shell or a tight cluster is locally hundreds of times denser,
+  so reusing the uniform radius would put every other dataset in the same very dense
+  regime). Real clouds use radii that mean something for a laser scan instead: 1 cm,
+  5 cm and 20 cm, with the density they realise recorded alongside
 - k of 1, 8 and 64 neighbours
 - query batches of 1e3, 1e5 and N points, drawn from the cloud's own points
 
@@ -61,6 +64,12 @@ REAL_SCAN_RADII = (0.01, 0.05, 0.2)
 
 # Points a real cloud is subsampled to, so it can be compared with the synthetic grid
 REAL_SUBSAMPLE_SIZE = 1_000_000
+
+# Radius calibration: how close the realised neighbour count has to get to the target,
+# how many tries it gets, and how many query points each try measures
+CALIBRATION_TOLERANCE = 0.2
+CALIBRATION_MAX_ITERATIONS = 10
+CALIBRATION_SAMPLE_SIZE = 2048
 
 
 def load_pointcloud(path: Path) -> npt.NDArray[np.float32]:
@@ -115,27 +124,96 @@ def subsample(
     return np.ascontiguousarray(points[np.sort(chosen)])
 
 
-def synthetic_radius_plans(
-    num_points: int, density_targets: tuple[float, ...]
-) -> list[harness.RadiusPlan]:
+def calibrate_radius(
+    points: npt.NDArray[np.float32], density_target: float, seed: int = 13
+) -> tuple[float, float]:
     """
-    Radii for a synthetic group, one per density target
+    Find the radius whose sphere holds `density_target` of this cloud's points
+
+    The density target is what makes a column of the grid comparable across datasets,
+    and it cannot be computed in closed form for anything but the uniform box: a
+    cylinder shell or a cluster of points is locally hundreds of times denser than a
+    uniform cloud of the same size in the same box, so the analytic radius would put
+    every one of those datasets in the same extremely dense regime. This measures the
+    realised neighbour count instead and walks the radius towards the target, fitting
+    the local exponent (3 for a solid volume, nearer 2 for a surface) from the last two
+    measurements so that surface-like clouds converge as fast as volume-like ones
 
     Args:
-        num_points: Points in the cloud
-        density_targets: Expected points per search sphere on the uniform cloud
+        points: The cloud to calibrate against (N, 3)
+        density_target: Wanted mean number of neighbours within the radius, not
+            counting the query point's own copy
+        seed: Seed for the random choice of sample points
+
+    Returns:
+        The calibrated radius, and the mean neighbour count it realised
+    """
+    from oxvox.nns import OxVoxNNS
+
+    rng = np.random.default_rng(seed=seed)
+    sample_size = min(CALIBRATION_SAMPLE_SIZE, len(points))
+    sample = np.ascontiguousarray(
+        points[rng.choice(len(points), size=sample_size, replace=False)]
+    )
+
+    # Start from the radius a uniform cloud of the same size filling the same bounding
+    # box would need, which is the right order of magnitude even when it is wrong
+    extent = np.maximum(np.ptp(points, axis=0), 1e-6)
+    volume_per_point = float(np.prod(extent)) / len(points)
+    radius = float((density_target * volume_per_point * 3.0 / (4.0 * np.pi)) ** (1.0 / 3.0))
+
+    previous: tuple[float, float] | None = None
+    realised = 0.0
+    for _ in range(CALIBRATION_MAX_ITERATIONS):
+        counts = OxVoxNNS(points, radius).count_neighbours(sample)
+        realised = float(counts.mean()) - 1.0
+        if abs(realised - density_target) <= CALIBRATION_TOLERANCE * density_target:
+            break
+
+        # Local dimensionality from the last two measurements, so the step size suits
+        # the cloud rather than assuming a solid volume
+        exponent = 3.0
+        if previous is not None and previous[1] > 0 and realised > 0 and previous[0] != radius:
+            measured = np.log(realised / previous[1]) / np.log(radius / previous[0])
+            exponent = float(np.clip(measured, 1.5, 3.5))
+        previous = (radius, realised)
+
+        ratio = max(density_target, 0.5) / max(realised, 0.05)
+        radius *= float(np.clip(ratio ** (1.0 / exponent), 0.25, 4.0))
+
+    return radius, realised
+
+
+def synthetic_radius_plans(
+    points: npt.NDArray[np.float32], density_targets: tuple[float, ...]
+) -> list[harness.RadiusPlan]:
+    """
+    Radii for a synthetic group, calibrated to one density target each
+
+    Args:
+        points: The cloud the radii are calibrated against
+        density_targets: Wanted mean neighbours per search sphere
 
     Returns:
         The radius plans, ascending
     """
-    return [
-        harness.RadiusPlan(
-            radius=generators.uniform_radius_for_density(num_points, target),
-            density_target=target,
-            chosen_for=f"~{target:g} points per sphere on uniform",
+    plans: list[harness.RadiusPlan] = []
+    for target in density_targets:
+        radius, realised = calibrate_radius(points, target)
+        logger.info(
+            "calibrated r=%.4g for ~%g points per sphere (realised %.3g)",
+            radius,
+            target,
+            realised,
         )
-        for target in density_targets
-    ]
+        plans.append(
+            harness.RadiusPlan(
+                radius=radius,
+                density_target=target,
+                chosen_for=f"calibrated to ~{target:g} points per sphere on this cloud",
+            )
+        )
+    return plans
 
 
 def real_radius_plans() -> list[harness.RadiusPlan]:
@@ -286,7 +364,7 @@ def main(argv: list[str] | None = None) -> int:
                     "load": lambda name=dataset_name, count=num_points: generators.generate(
                         name, count
                     ),
-                    "radius_plans": synthetic_radius_plans(num_points, density_targets),
+                    "plan": lambda cloud: synthetic_radius_plans(cloud, density_targets),
                 }
             )
     for label, path in arguments.real_pointclouds:
@@ -307,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
                             + ("" if count == len(cloud) else " (random subsample)")
                         ),
                     ),
-                    "radius_plans": real_radius_plans(),
+                    "plan": lambda cloud: real_radius_plans(),
                 }
             )
 
@@ -327,7 +405,7 @@ def main(argv: list[str] | None = None) -> int:
             dataset_label=group["label"],
             description=cloud["description"],
             points=cloud["points"],
-            radius_plans=group["radius_plans"],
+            radius_plans=group["plan"](cloud["points"]),
             num_neighbours_values=neighbour_counts,
             query_counts=query_counts,
             competitor_keys=competitor_keys,

@@ -15,11 +15,19 @@ maturin develop --release --features kiddo-baseline      # adds method="kiddo"
 python -m benchmarks.run --quick                         # smoke grid, a few minutes
 python -m benchmarks.run                                 # the full grid, a few hours
 python -m benchmarks.report                              # results/report.html
+python -m benchmarks.heuristic                           # score the method="auto" rule
 ```
 
 `--quick` runs two generators at up to 100k points, which is enough to check the
 harness end to end. The full grid sweeps point counts up to 4e6, four density targets,
 k in {1, 8, 64} and query batches of 1e3, 1e5 and N.
+
+Each dataset's four radii are *calibrated* so that a search sphere really holds about
+1, 10, 100 and 1000 of that cloud's points: the closed-form radius only works for the
+uniform box, and a cylinder shell or a tight Gaussian cluster is locally hundreds of
+times denser, so reusing the uniform radius would put every other dataset in the same
+very dense regime and collapse the density axis. The real scans keep physical radii
+(1 cm, 5 cm, 20 cm) and the density they realise is recorded next to the timings.
 
 The `kiddo-baseline` feature is optional: without it the `kiddo` backend is simply
 absent from the grid, as are scipy and Open3D if they are not installed.
@@ -40,11 +48,12 @@ is imported lazily and is not a dependency of anything here.
 
 | File | What it does |
 |------|--------------|
-| `generators.py` | Five seeded synthetic families: uniform box, Gaussian clusters, cylinder shell with axial density falloff, near-planar sheet, and a mixed scene. All fill the same 100 m box, so one radius means one density target across the family |
+| `generators.py` | Five seeded synthetic families: uniform box, Gaussian clusters, cylinder shell with axial density falloff, near-planar sheet, and a mixed scene. All fill the same 100 m box |
 | `competitors.py` | One interface over scipy, Open3D and every oxvox method, normalising the three padding conventions onto oxvox's (`-1` indices, `-1.0` distances, nearest first) |
 | `harness.py` | Times builds and queries, checks answers against scipy, records peak RSS, writes the JSON |
 | `run.py` | The grid CLI |
 | `report.py` | Builds `results/report.html` |
+| `heuristic.py` | Scores the `method="auto"` rule against the measured grid (hit rate and regret), and against every fixed single-method policy |
 | `test_generators.py` | Unit tests for the generators (run by `make test`) |
 
 ## How a measurement is taken

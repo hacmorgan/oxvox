@@ -103,7 +103,8 @@ families and two 16M-point laser scans, point counts from 1e4 to 1.6e7, k in
   of percent of it at the median; its worst case against the best backend of the moment
   is 1.5x at the 90th percentile.
 - Against **scipy's cKDTree** it is a median 2.1x faster on queries (10th percentile
-  1.1x, 90th 3.1x) and 7-10x faster to build; scipy only wins on tiny query batches,
+  1.1x, 90th 3.1x) and a median 5.6x faster to build (8.4x from a million points up);
+  scipy only wins on tiny query batches,
   where it can be up to 3.3x faster because oxvox's per-call thread pool costs more
   than the query.
 - Against **Open3D's hybrid search** it is a median 1.9x faster, and up to 22x faster

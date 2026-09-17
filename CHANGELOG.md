@@ -14,10 +14,12 @@
   built with the hybrid grid; queries enter at their exact nearest search point and
   flood outwards best-first. Guarantees: never a point outside the radius, never a
   duplicate, trailing -1 padding, counts never exceed the exact count. Recall is
-  measured, not promised (>= 0.99 on uniform data for k <= degree in tests). On the
-  historical 4M-point scenarios it is 7-10x slower than the exact methods for kNN and
-  far slower for counting (its flood must visit every in-range point through a heap),
-  so it is an experiment, not a recommendation.
+  measured, not promised. Across the benchmark grid its kNN recall has a median of
+  1.0000 and a minimum of 0.9853, and is at least 0.99 on 98% of the checks, but it is
+  a median 3.2x slower than the fastest exact backend (90th percentile 14x, worst 64x)
+  and its counts are badly low on dense clouds (agreeing with scipy on as few as 2.3%
+  of query points), because a flood that stops at the k-th best neighbour has no reason
+  to visit every point in the radius. It is an experiment, not a recommendation.
 - `oxvox.nns.EXACT_METHODS`, and `grid_stats()` now also reports `num_subtrees`
   (hybrid) / `graph_degree` (graph).
 - `OxVoxNNS(..., cells_per_radius=n)`: for the voxel method, how many grid cells span

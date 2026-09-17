@@ -88,7 +88,7 @@ jobs:
         run: |
           pip install numpy numpy_indexed pytest
           pip install oxvox --no-index --no-deps --find-links dist --force-reinstall
-          make test
+          make test-python
 
       # Upload wheels to PyPI
       - name: Upload wheels
@@ -175,7 +175,7 @@ jobs:
         run: |
           pip install numpy numpy_indexed pytest
           pip install oxvox --no-index --no-deps --find-links dist --force-reinstall
-          make test
+          make test-python
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
@@ -215,7 +215,7 @@ jobs:
         run: |
           pip install numpy numpy_indexed pytest
           pip install oxvox --no-index --no-deps --find-links dist --force-reinstall
-          make test
+          make test-python
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:

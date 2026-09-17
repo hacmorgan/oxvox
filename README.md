@@ -66,6 +66,16 @@ Two indices are available via the `method` argument:
 - `"kdtree"`: a bucketed KD-tree (median splits on the widest axis, 16-point leaves).
   Cheaper on sparse or very non-uniform clouds, or when the search radius is large
   relative to the point spacing.
+- `"hybrid"`: the voxel grid, with a KD subtree inside every cell that holds more than
+  `subtree_threshold` points (default 64). Dense cells are searched in logarithmic
+  rather than linear time, which removes the grid's weak spot on clustered data while
+  keeping its O(1) cell lookup. Exact.
+- `"graph"`: **approximate**. Each search point is linked to its `graph_degree` (default
+  16) nearest neighbours at build time. A query finds its single nearest search point
+  exactly through the hybrid grid, then floods outwards along graph edges in
+  best-first order. It never returns a point outside the radius and never a duplicate,
+  but it can miss neighbours; recall is high for `num_neighbours <= graph_degree` and
+  degrades gradually above it. Counts can only ever undercount.
 
 `method="auto"` currently resolves to `"voxel"`; a heuristic derived from benchmarks is
 planned. `grid_stats()` exposes the voxel grid's occupancy (cell count, max and mean
@@ -102,8 +112,10 @@ takes an `epsilon`: once `num_neighbours` neighbours closer than `epsilon` have 
 found for a query point, its search stops early, which can help avoid getting bogged
 down in very dense regions of the search points (results are then approximate).
 
-Both methods return identical results (up to tie ordering); they are tested against a
-brute-force reference and against each other.
+The exact methods (`voxel`, `kdtree`, `hybrid`) return identical results up to tie
+ordering; they are tested against a brute-force reference and against each other.
+`oxvox.nns.EXACT_METHODS` lists them, and `oxvox.nns.available_methods()` lists every
+method compiled into the installed build.
 
 
 ## Tests

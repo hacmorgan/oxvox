@@ -11,7 +11,10 @@ from numpy.lib.recfunctions import structured_to_unstructured
 from oxvox._oxvox import OxVoxNNSEngine, available_methods
 
 # Search methods the Rust engine can be built with, plus "auto" which picks one
-Method = Literal["voxel", "kdtree", "kiddo", "auto"]
+Method = Literal["voxel", "kdtree", "hybrid", "graph", "kiddo", "auto"]
+
+# Methods that return exactly the brute-force answer (everything except "graph")
+EXACT_METHODS = ("voxel", "kdtree", "hybrid", "kiddo")
 
 
 class OxVoxNNS:
@@ -27,6 +30,13 @@ class OxVoxNNS:
             dense, clustered clouds where KD-trees struggle
         "kdtree": Bucketed KD-tree with median splits on the widest axis. Cheaper on
             sparse or very non-uniform clouds
+        "hybrid": The voxel grid, with a KD subtree inside every cell holding more than
+            ``subtree_threshold`` points, so dense cells are searched in logarithmic
+            rather than linear time. Exact
+        "graph": Approximate. Each search point is linked to its ``graph_degree``
+            nearest neighbours at build time; a query finds its nearest search point
+            exactly (via the hybrid grid) then floods outwards along graph edges. Never
+            returns a point outside the radius, but may miss some neighbours
         "kiddo": The ``kiddo`` crate's KD-tree, only present in builds compiled with
             the ``kiddo-baseline`` cargo feature (used for benchmarking)
         "auto": Currently resolves to "voxel"; a data-driven heuristic is planned
@@ -38,6 +48,8 @@ class OxVoxNNS:
         search_radius: float,
         method: Method = "voxel",
         cells_per_radius: int = 1,
+        subtree_threshold: int = 64,
+        graph_degree: int = 16,
     ) -> None:
         """
         Construct neighbour searcher object
@@ -52,9 +64,14 @@ class OxVoxNNS:
             search_radius: Maximum distance between points before they are no longer
                 considered neighbours
             method: Which spatial index to build, see the class docstring
-            cells_per_radius: For the "voxel" method, how many grid cells span one
+            cells_per_radius: For the grid-based methods, how many grid cells span one
                 search radius. 1 gives the classic 27-cell neighbourhood; 2 gives
                 smaller cells with less over-scan per query but more cell lookups
+            subtree_threshold: For "hybrid" and "graph", cells with more points than
+                this get a KD subtree instead of a linear scan
+            graph_degree: For "graph", how many nearest neighbours each search point is
+                linked to. Recall is high for `num_neighbours <= graph_degree` and
+                degrades gradually above it
         """
         # The rust engine strictly expects 3-column unstructured arrays of 32-bit
         # floats, so we must convert structured arrays to unstructured and ensure we
@@ -70,6 +87,8 @@ class OxVoxNNS:
             search_radius,
             method=resolved_method,
             cells_per_radius=cells_per_radius,
+            subtree_threshold=subtree_threshold,
+            graph_degree=graph_degree,
         )
 
     @property
@@ -172,6 +191,7 @@ class OxVoxNNS:
 
         Returns:
             Dict with `num_cells`, `max_points_per_cell` and `mean_points_per_cell`
+            (plus `num_subtrees` for the "hybrid" method)
         """
         return self.engine.grid_stats()
 
@@ -192,4 +212,4 @@ class OxVoxNNS:
         return np.ascontiguousarray(points, dtype=np.float32)
 
 
-__all__ = ["OxVoxNNS", "Method", "available_methods"]
+__all__ = ["OxVoxNNS", "Method", "EXACT_METHODS", "available_methods"]

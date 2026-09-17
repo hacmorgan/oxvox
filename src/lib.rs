@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 
 mod index;
 
+use index::graph::KnnGraph;
+use index::hybrid::HybridGrid;
 use index::kdtree::KdTree;
 use index::voxel::VoxelGrid;
 
@@ -22,6 +24,8 @@ type NeighbourArrays<'py> = (Bound<'py, PyArray2<i32>>, Bound<'py, PyArray2<f32>
 /// Names of the available search methods, as accepted by `OxVoxNNSEngine::new`
 const METHOD_VOXEL: &str = "voxel";
 const METHOD_KDTREE: &str = "kdtree";
+const METHOD_HYBRID: &str = "hybrid";
+const METHOD_GRAPH: &str = "graph";
 #[cfg(feature = "kiddo-baseline")]
 const METHOD_KIDDO: &str = "kiddo";
 
@@ -30,6 +34,8 @@ const METHOD_KIDDO: &str = "kiddo";
 enum Backend {
     Voxel(VoxelGrid),
     KdTree(KdTree),
+    Hybrid(HybridGrid),
+    Graph(KnnGraph),
     #[cfg(feature = "kiddo-baseline")]
     Kiddo(KiddoTree),
 }
@@ -41,6 +47,8 @@ impl Backend {
         search_points: ArrayView2<f32>,
         max_dist: f32,
         cells_per_radius: u32,
+        subtree_threshold: usize,
+        graph_degree: usize,
     ) -> PyResult<Self> {
         match method {
             METHOD_VOXEL => Ok(Backend::Voxel(VoxelGrid::new(
@@ -49,6 +57,19 @@ impl Backend {
                 cells_per_radius,
             ))),
             METHOD_KDTREE => Ok(Backend::KdTree(KdTree::new(search_points))),
+            METHOD_HYBRID => Ok(Backend::Hybrid(HybridGrid::new(
+                search_points,
+                max_dist,
+                cells_per_radius,
+                subtree_threshold,
+            ))),
+            METHOD_GRAPH => Ok(Backend::Graph(KnnGraph::new(
+                search_points,
+                max_dist,
+                cells_per_radius,
+                subtree_threshold,
+                graph_degree,
+            ))),
             #[cfg(feature = "kiddo-baseline")]
             METHOD_KIDDO => Ok(Backend::Kiddo(KiddoTree::new(search_points))),
             other => Err(PyValueError::new_err(format!(
@@ -63,9 +84,32 @@ impl Backend {
         vec![
             METHOD_VOXEL,
             METHOD_KDTREE,
+            METHOD_HYBRID,
+            METHOD_GRAPH,
             #[cfg(feature = "kiddo-baseline")]
             METHOD_KIDDO,
         ]
+    }
+
+    /// The voxel grid underneath grid-based methods, for statistics
+    fn grid(&self) -> Option<&VoxelGrid> {
+        match self {
+            Backend::Voxel(grid) => Some(grid),
+            Backend::Hybrid(hybrid) => Some(hybrid.grid()),
+            Backend::Graph(graph) => Some(graph.grid()),
+            _ => None,
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Backend::Voxel(grid) => index::NeighbourIndex::len(grid),
+            Backend::KdTree(tree) => index::NeighbourIndex::len(tree),
+            Backend::Hybrid(hybrid) => index::NeighbourIndex::len(hybrid),
+            Backend::Graph(graph) => index::NeighbourIndex::len(graph),
+            #[cfg(feature = "kiddo-baseline")]
+            Backend::Kiddo(tree) => index::NeighbourIndex::len(tree),
+        }
     }
 
     fn find_neighbours(
@@ -89,6 +133,24 @@ impl Backend {
             Backend::KdTree(tree) => index::find_neighbours(
                 tree,
                 Some(tree.original_indices()),
+                query_points,
+                num_neighbours,
+                max_dist,
+                epsilon,
+                progress,
+            ),
+            Backend::Hybrid(hybrid) => index::find_neighbours(
+                hybrid,
+                Some(hybrid.grid().original_indices()),
+                query_points,
+                num_neighbours,
+                max_dist,
+                epsilon,
+                progress,
+            ),
+            Backend::Graph(graph) => index::find_neighbours(
+                graph,
+                Some(graph.grid().original_indices()),
                 query_points,
                 num_neighbours,
                 max_dist,
@@ -122,6 +184,12 @@ impl Backend {
             Backend::KdTree(tree) => {
                 index::count_neighbours(tree, query_points, max_dist, weight, progress)
             }
+            Backend::Hybrid(hybrid) => {
+                index::count_neighbours(hybrid, query_points, max_dist, weight, progress)
+            }
+            Backend::Graph(graph) => {
+                index::count_neighbours(graph, query_points, max_dist, weight, progress)
+            }
             #[cfg(feature = "kiddo-baseline")]
             Backend::Kiddo(tree) => {
                 index::count_neighbours(tree, query_points, max_dist, weight, progress)
@@ -138,6 +206,8 @@ struct OxVoxNNSEngine {
     max_dist: f32,
     method: String,
     cells_per_radius: u32,
+    subtree_threshold: usize,
+    graph_degree: usize,
 }
 
 /// Build a rayon thread pool for a single query call
@@ -154,6 +224,16 @@ fn _build_thread_pool(num_threads: usize) -> rayon::ThreadPool {
         .num_threads(num_threads)
         .build()
         .expect("failed to build rayon thread pool")
+}
+
+/// Reject arrays that aren't (N, 3)
+fn _check_three_columns(name: &str, shape: &[usize]) -> PyResult<()> {
+    if shape.len() != 2 || shape[1] != 3 {
+        return Err(PyValueError::new_err(format!(
+            "{name} must have shape (N, 3), got {shape:?}"
+        )));
+    }
+    Ok(())
 }
 
 /// Rust engine for computing row indices for each unique value in a field or fields in a pointcloud
@@ -219,40 +299,51 @@ impl OxVoxNNSEngine {
     /// Args:
     ///     search_points: Points to search for neighbours amongst (N, 3)
     ///     max_dist: Search radius; neighbours at or beyond it are ignored
-    ///     method: Search method: "voxel" (uniform grid) or "kdtree"
-    ///     cells_per_radius: For the voxel method, how many grid cells span one radius
+    ///     method: Search method: "voxel" (uniform grid), "kdtree", "hybrid" (grid with
+    ///         KD subtrees in dense cells) or "graph" (approximate, kNN graph flood)
+    ///     cells_per_radius: For grid-based methods, how many grid cells span one radius
+    ///     subtree_threshold: For "hybrid"/"graph", cells with more points than this get
+    ///         a KD subtree
+    ///     graph_degree: For "graph", how many neighbours each point links to
     #[new]
-    #[pyo3(signature = (search_points, max_dist, method = "voxel", cells_per_radius = 1))]
+    #[pyo3(signature = (search_points, max_dist, method = "voxel", cells_per_radius = 1, subtree_threshold = 64, graph_degree = 16))]
     fn new(
         py: Python<'_>,
         search_points: PyReadonlyArray2<f32>,
         max_dist: f32,
         method: &str,
         cells_per_radius: u32,
+        subtree_threshold: usize,
+        graph_degree: usize,
     ) -> PyResult<Self> {
         if max_dist <= 0.0 || !max_dist.is_finite() {
             return Err(PyValueError::new_err(format!(
                 "max_dist must be a positive finite number, got {max_dist}"
             )));
         }
-        if search_points.shape()[1] != 3 {
-            return Err(PyValueError::new_err(format!(
-                "search_points must have shape (N, 3), got {:?}",
-                search_points.shape()
-            )));
-        }
+        _check_three_columns("search_points", search_points.shape())?;
         let search_points = search_points.as_array();
 
         // Building the index is a heavy, purely-Rust operation, so let other Python
         // threads run in the meantime
-        let backend =
-            py.detach(|| Backend::build(method, search_points, max_dist, cells_per_radius))?;
+        let backend = py.detach(|| {
+            Backend::build(
+                method,
+                search_points,
+                max_dist,
+                cells_per_radius,
+                subtree_threshold,
+                graph_degree,
+            )
+        })?;
 
         Ok(OxVoxNNSEngine {
             backend,
             max_dist,
             method: method.to_owned(),
             cells_per_radius,
+            subtree_threshold,
+            graph_degree,
         })
     }
 
@@ -264,30 +355,30 @@ impl OxVoxNNSEngine {
 
     /// Number of indexed search points
     fn __len__(&self) -> usize {
-        match &self.backend {
-            Backend::Voxel(grid) => index::NeighbourIndex::len(grid),
-            Backend::KdTree(tree) => index::NeighbourIndex::len(tree),
-            #[cfg(feature = "kiddo-baseline")]
-            Backend::Kiddo(tree) => index::NeighbourIndex::len(tree),
-        }
+        self.backend.len()
     }
 
     /// Statistics about the voxel grid's occupancy, for choosing between methods
     ///
     /// Returns:
-    ///     Dict with `num_cells`, `max_points_per_cell` and `mean_points_per_cell`,
-    ///     or None for methods that don't use a grid
+    ///     Dict with `num_cells`, `max_points_per_cell` and `mean_points_per_cell`
+    ///     (plus `num_subtrees` for the hybrid method), or None for methods that
+    ///     don't use a grid
     fn grid_stats<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
-        match &self.backend {
-            Backend::Voxel(grid) => {
-                let stats = PyDict::new(py);
-                stats.set_item("num_cells", grid.num_cells())?;
-                stats.set_item("max_points_per_cell", grid.max_points_per_cell())?;
-                stats.set_item("mean_points_per_cell", grid.mean_points_per_cell())?;
-                Ok(Some(stats))
-            }
-            _ => Ok(None),
+        let Some(grid) = self.backend.grid() else {
+            return Ok(None);
+        };
+        let stats = PyDict::new(py);
+        stats.set_item("num_cells", grid.num_cells())?;
+        stats.set_item("max_points_per_cell", grid.max_points_per_cell())?;
+        stats.set_item("mean_points_per_cell", grid.mean_points_per_cell())?;
+        if let Backend::Hybrid(hybrid) = &self.backend {
+            stats.set_item("num_subtrees", hybrid.num_subtrees())?;
         }
+        if let Backend::Graph(graph) = &self.backend {
+            stats.set_item("graph_degree", graph.degree())?;
+        }
+        Ok(Some(stats))
     }
 
     /// Find neighbours of query points within search points
@@ -314,12 +405,7 @@ impl OxVoxNNSEngine {
         epsilon: f32,
         progress: bool,
     ) -> PyResult<NeighbourArrays<'py>> {
-        if query_points.shape()[1] != 3 {
-            return Err(PyValueError::new_err(format!(
-                "query_points must have shape (Q, 3), got {:?}",
-                query_points.shape()
-            )));
-        }
+        _check_three_columns("query_points", query_points.shape())?;
         let query_points = query_points.as_array();
 
         // Release the GIL for the duration of the parallel search, and scope this
@@ -372,12 +458,7 @@ impl OxVoxNNSEngine {
                 "distance_weight_factor must be non-negative",
             ));
         }
-        if query_points.shape()[1] != 3 {
-            return Err(PyValueError::new_err(format!(
-                "query_points must have shape (Q, 3), got {:?}",
-                query_points.shape()
-            )));
-        }
+        _check_three_columns("query_points", query_points.shape())?;
         let query_points = query_points.as_array();
 
         let counts = py.detach(|| {
@@ -414,12 +495,14 @@ impl OxVoxNNSEngine {
     pub fn __getnewargs__<'py>(
         &self,
         py: Python<'py>,
-    ) -> (Bound<'py, PyArray2<f32>>, f32, String, u32) {
+    ) -> (Bound<'py, PyArray2<f32>>, f32, String, u32, usize, usize) {
         (
             Array2::<f32>::zeros((0, 3)).into_pyarray(py),
             self.max_dist,
             self.method.clone(),
             self.cells_per_radius,
+            self.subtree_threshold,
+            self.graph_degree,
         )
     }
 }

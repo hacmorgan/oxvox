@@ -19,23 +19,24 @@ type CellCoords = [i32; 3];
 /// Fast non-cryptographic hasher for cell lookups
 type CellHasher = ahash::RandomState;
 
+/// Fields are visible to the sibling backends (`hybrid`, `graph`) that build on the grid
 #[derive(Serialize, Deserialize)]
 pub struct VoxelGrid {
-    cell_size: f32,
-    inv_cell_size: f32,
+    pub(super) cell_size: f32,
+    pub(super) inv_cell_size: f32,
     /// Search points, permuted so that each cell's points are contiguous
-    points: Vec<Point>,
+    pub(super) points: Vec<Point>,
     /// Original index of each stored point
-    original_indices: Vec<u32>,
+    pub(super) original_indices: Vec<u32>,
     /// Coordinates of each non-empty cell, in storage order
-    cell_coords: Vec<CellCoords>,
+    pub(super) cell_coords: Vec<CellCoords>,
     /// Start offset into `points` of each cell, plus a final end sentinel
-    cell_starts: Vec<u32>,
+    pub(super) cell_starts: Vec<u32>,
     /// Cell coordinates -> position in `cell_coords` / `cell_starts`
-    cell_lookup: HashMap<CellCoords, u32, CellHasher>,
+    pub(super) cell_lookup: HashMap<CellCoords, u32, CellHasher>,
     /// Relative coordinates of the cells that can hold a point within the radius,
     /// nearest first so the pruning bound tightens as early as possible
-    neighbour_offsets: Vec<CellCoords>,
+    pub(super) neighbour_offsets: Vec<CellCoords>,
 }
 
 impl VoxelGrid {
@@ -113,6 +114,21 @@ impl VoxelGrid {
             .unwrap_or(0)
     }
 
+    /// Storage range `[start, end)` of a cell's points
+    #[inline(always)]
+    pub(super) fn cell_range(&self, cell_idx: usize) -> (usize, usize) {
+        (
+            self.cell_starts[cell_idx] as usize,
+            self.cell_starts[cell_idx + 1] as usize,
+        )
+    }
+
+    /// Mutable access to the stored points and their original indices, for backends
+    /// that reorder points within cells (they must keep cells contiguous)
+    pub(super) fn points_mut(&mut self) -> (&mut [Point], &mut [u32]) {
+        (&mut self.points, &mut self.original_indices)
+    }
+
     /// Mean points per non-empty cell
     pub fn mean_points_per_cell(&self) -> f32 {
         if self.cell_coords.is_empty() {
@@ -122,9 +138,15 @@ impl VoxelGrid {
         }
     }
 
+    /// Cell containing a point
+    #[inline(always)]
+    pub(super) fn cell_of(&self, point: &Point) -> CellCoords {
+        _cell_of(point, self.inv_cell_size)
+    }
+
     /// Squared distance from `query` to the nearest point of the cell's bounding box
     #[inline(always)]
-    fn _cell_min_distance_sq(&self, query: &Point, cell: &CellCoords) -> f32 {
+    pub(super) fn cell_min_distance_sq(&self, query: &Point, cell: &CellCoords) -> f32 {
         let mut total = 0.0;
         for axis in 0..3 {
             let low = cell[axis] as f32 * self.cell_size;
@@ -143,8 +165,10 @@ impl VoxelGrid {
 }
 
 impl NeighbourIndex for VoxelGrid {
-    fn search<V: CandidateVisitor>(&self, query: &Point, visitor: &mut V) {
-        let query_cell = _cell_of(query, self.inv_cell_size);
+    type Scratch = ();
+
+    fn search<V: CandidateVisitor>(&self, query: &Point, visitor: &mut V, _scratch: &mut ()) {
+        let query_cell = self.cell_of(query);
         for offset in &self.neighbour_offsets {
             let cell = [
                 query_cell[0] + offset[0],
@@ -153,13 +177,12 @@ impl NeighbourIndex for VoxelGrid {
             ];
 
             // Skip cells whose whole bounding box is already beyond the bound
-            if self._cell_min_distance_sq(query, &cell) >= visitor.bound_sq() {
+            if self.cell_min_distance_sq(query, &cell) >= visitor.bound_sq() {
                 continue;
             }
 
             if let Some(&cell_idx) = self.cell_lookup.get(&cell) {
-                let start = self.cell_starts[cell_idx as usize] as usize;
-                let end = self.cell_starts[cell_idx as usize + 1] as usize;
+                let (start, end) = self.cell_range(cell_idx as usize);
                 for (position, point) in self.points[start..end].iter().enumerate() {
                     visitor.visit(distance_sq(query, point), (start + position) as u32);
                 }

@@ -6,6 +6,20 @@
 - `OxVoxNNS(..., method="kdtree")`: a hand-rolled bucketed KD-tree as an alternative to
   the voxel grid. Both backends share one query engine and are tested against a
   brute-force reference; results are identical up to tie ordering.
+- `method="hybrid"`: the voxel grid with a KD subtree inside every cell holding more
+  than `subtree_threshold` points (default 64). Exact; on the 4M-point dense-cluster
+  scenario it cuts the grid's query time from 0.72 s to 0.47 s (the plain KD-tree does
+  it in 0.14 s), and matches the grid exactly on uniform data where no cell is dense.
+- `method="graph"` (approximate): a kNN graph of degree `graph_degree` (default 16)
+  built with the hybrid grid; queries enter at their exact nearest search point and
+  flood outwards best-first. Guarantees: never a point outside the radius, never a
+  duplicate, trailing -1 padding, counts never exceed the exact count. Recall is
+  measured, not promised (>= 0.99 on uniform data for k <= degree in tests). On the
+  historical 4M-point scenarios it is 7-10x slower than the exact methods for kNN and
+  far slower for counting (its flood must visit every in-range point through a heap),
+  so it is an experiment, not a recommendation.
+- `oxvox.nns.EXACT_METHODS`, and `grid_stats()` now also reports `num_subtrees`
+  (hybrid) / `graph_degree` (graph).
 - `OxVoxNNS(..., cells_per_radius=n)`: for the voxel method, how many grid cells span
   one search radius (default 1, the classic 27-cell neighbourhood).
 - `OxVoxNNS.method`, `len(nns)`, `OxVoxNNS.grid_stats()` (cell count, max and mean points

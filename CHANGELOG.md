@@ -43,10 +43,5 @@
 
 ### Breaking
 - Python 3.8 and 3.9 are no longer supported.
-- **Pickle format**: do not expect a pickle produced by 1.0.0 to be loadable by a
-  future oxvox release without checking the changelog first; the pyo3 0.29 migration
-  changed the pickling surface (`__getstate__`/`__setstate__`/`__getnewargs__`) enough
-  that we are not treating cross-version pickle compatibility as guaranteed going
-  forward. This is not a regression from 0.7.x: pickling `OxVoxNNS` never worked there
-  in the first place (see Fixed, above), so there is no working 0.7.x pickle format to
-  be compatible with.
+- **Pickle format**: pickles are not guaranteed to load across oxvox releases. This is
+  not a regression from 0.7.x, where pickling `OxVoxNNS` never worked at all (see Fixed).

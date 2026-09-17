@@ -70,8 +70,18 @@ pub fn indices_by_field<'py>(
     let mut write_cursors: Vec<usize> = vec![0; counts.len()];
 
     for (row, &id) in unique_ids.iter().enumerate() {
-        let id = id as usize;
+        // Reject ids that don't index `counts`, and ids that appear more often than
+        // their count claims, with a Python exception rather than a panic
+        let id = usize::try_from(id)
+            .ok()
+            .filter(|&id| id < counts.len())
+            .ok_or_else(|| PyValueError::new_err(format!("unique id {id} out of range")))?;
         let cursor = &mut write_cursors[id];
+        if *cursor >= indices_by_id[id].len() {
+            return Err(PyValueError::new_err(format!(
+                "unique id {id} appears more times than its count"
+            )));
+        }
         indices_by_id[id][*cursor] = row as u64;
         *cursor += 1;
     }

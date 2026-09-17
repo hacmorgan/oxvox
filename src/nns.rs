@@ -1,7 +1,7 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap};
 
-use indicatif::{ParallelProgressIterator, ProgressIterator};
+use indicatif::ParallelProgressIterator;
 
 use ndarray::parallel::prelude::*;
 use ndarray::{s, Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1, Axis};
@@ -63,84 +63,9 @@ pub fn initialise_nns(
 
 /// Find the (up to) N nearest neighbours within a given radius for each query point
 ///
-/// Args:
-///     search_points: Pointcloud we are searching for neighbours within (S, 3)
-///     query_points: Points we are searching for the neighbours of (Q, 3)
-///     num_neighbours: Maximum number of neighbours to search for
-///     max_dist: Furthest distance to neighbouring points before we don't care about them
-///
-/// Returns:
-///     Indices of neighbouring points (Q, num_neighbours)
-///     Distances of neighbouring points from query point (Q, num_neighbours)
-pub fn find_neighbours_singlethread(
-    query_points: ArrayView2<f32>,
-    search_points: &Array2<f32>,
-    search_points_by_voxel: &HashMap<(i32, i32, i32), Vec<i32>>,
-    voxel_offsets: &Array2<i32>,
-    num_neighbours: i32,
-    max_dist: f32,
-    epsilon: f32,
-) -> (Array2<i32>, Array2<f32>) {
-    // Group query point indices by voxel into a hashmap indexed by voxel coordinates
-    let query_points_by_voxel = _group_by_voxel(query_points, max_dist);
-
-    // Extract keys (unique voxel coords) into a vec to ensure we iterate over the
-    // hashmap consistently
-    let keys: Vec<(i32, i32, i32)> = query_points_by_voxel.clone().into_keys().collect();
-
-    // Zip search points, query points, and output array chunks together, to be
-    // processed in parallel
-    let processed_chunks: Vec<((Array2<i32>, Array2<f32>), (i32, i32, i32))> = keys
-        .clone()
-        .into_iter()
-        .progress_count(keys.len() as u64)
-        .map(|voxel| {
-            (
-                _process_query_point_voxel(
-                    &voxel,
-                    &query_points,
-                    &query_points_by_voxel,
-                    search_points,
-                    search_points_by_voxel,
-                    voxel_offsets,
-                    num_neighbours,
-                    max_dist,
-                    epsilon,
-                ),
-                voxel,
-            )
-        })
-        .collect();
-
-    // Construct output arrays, initialised with -1s
-    let num_query_points = query_points.shape()[0];
-    let mut indices: Array2<i32> =
-        Array2::from_elem([num_query_points, num_neighbours as usize], -1i32);
-    let mut distances: Array2<f32> =
-        Array2::from_elem([num_query_points, num_neighbours as usize], -1f32);
-
-    // Insert values from processed voxel chunks back into output array
-    processed_chunks
-        .iter()
-        .for_each(|((chunk_indices, chunk_distances), voxel)| {
-            let query_point_indices = query_points_by_voxel.get(&voxel).unwrap();
-            query_point_indices
-                .iter()
-                .map(|&idx| idx as usize)
-                .zip(chunk_indices.axis_iter(Axis(0)))
-                .zip(chunk_distances.axis_iter(Axis(0)))
-                .for_each(
-                    |((query_point_idx, chunk_indices_row), chunk_distances_row)| {
-                        chunk_indices_row.assign_to(indices.slice_mut(s![query_point_idx, ..]));
-                        chunk_distances_row.assign_to(distances.slice_mut(s![query_point_idx, ..]));
-                    },
-                )
-        });
-
-    (indices, distances)
-}
-
-/// Find the (up to) N nearest neighbours within a given radius for each query point
+/// Runs on whatever rayon thread pool is installed by the caller (see `lib.rs`, which
+/// builds a per-call pool sized by `num_threads`); a pool built with a single thread
+/// gives single-threaded behaviour without needing a separate code path here
 ///
 /// Args:
 ///     search_points: Pointcloud we are searching for neighbours within (S, 3)
@@ -393,75 +318,9 @@ fn _find_query_point_neighbours(
 
 /// Count (optionally distance-weighted) neighbours within a given radius for each query point
 ///
-/// Args:
-///     search_points: Pointcloud we are searching for neighbours within (S, 3)
-///     query_points: Points we are searching for the neighbours of (Q, 3)
-///     max_dist: Furthest distance to neighbouring points before we don't care about them
-///     distance_weight_factor: If `None`, count neighbours within `max_dist` exactly (each
-///         contributes 1). If `Some(p)`, each neighbour instead contributes
-///         `(1 - distance / max_dist).powf(p)`, so contributions run from 1 at zero
-///         distance down to 0 at `max_dist`. Must be non-negative
-///
-/// Returns:
-///     Neighbour count (or distance-weighted sum) for each query point (Q,)
-pub fn count_neighbours_singlethread(
-    query_points: ArrayView2<f32>,
-    search_points: &Array2<f32>,
-    search_points_by_voxel: &HashMap<(i32, i32, i32), Vec<i32>>,
-    voxel_offsets: &Array2<i32>,
-    max_dist: f32,
-    distance_weight_factor: Option<f32>,
-) -> Array1<f32> {
-    // Group query point indices by voxel into a hashmap indexed by voxel coordinates
-    let query_points_by_voxel = _group_by_voxel(query_points, max_dist);
-
-    // Extract keys (unique voxel coords) into a vec to ensure we iterate over the
-    // hashmap consistently
-    let keys: Vec<(i32, i32, i32)> = query_points_by_voxel.clone().into_keys().collect();
-
-    // Construct output arrays, initialised with 0s
-    let num_query_points = query_points.shape()[0];
-    let mut counts: Array1<f32> = Array1::from_elem([num_query_points], 0f32);
-
-    // Zip search points, query points, and output array chunks together, to be
-    // processed in parallel
-    let processed_chunks: Vec<(Array1<f32>, (i32, i32, i32))> = keys
-        .clone()
-        .into_iter()
-        .progress_count(keys.len() as u64)
-        .map(|voxel| {
-            (
-                _count_query_point_voxel(
-                    &voxel,
-                    &query_points,
-                    &query_points_by_voxel,
-                    search_points,
-                    search_points_by_voxel,
-                    voxel_offsets,
-                    max_dist,
-                    distance_weight_factor,
-                ),
-                voxel,
-            )
-        })
-        .collect();
-
-    // Insert values from processed voxel chunks back into output array
-    processed_chunks.iter().for_each(|(chunk_counts, voxel)| {
-        let query_point_indices = query_points_by_voxel.get(&voxel).unwrap();
-        query_point_indices
-            .iter()
-            .map(|&idx| idx as usize)
-            .zip(chunk_counts.axis_iter(Axis(0)))
-            .for_each(|(query_point_idx, chunk_count)| {
-                chunk_count.assign_to(counts.slice_mut(s![query_point_idx]));
-            })
-    });
-
-    counts
-}
-
-/// Count (optionally distance-weighted) neighbours within a given radius for each query point
+/// Runs on whatever rayon thread pool is installed by the caller (see `lib.rs`, which
+/// builds a per-call pool sized by `num_threads`); a pool built with a single thread
+/// gives single-threaded behaviour without needing a separate code path here
 ///
 /// Args:
 ///     search_points: Pointcloud we are searching for neighbours within (S, 3)

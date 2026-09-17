@@ -1,24 +1,143 @@
 use bincode::{deserialize, serialize};
-use ndarray::Array1;
-use ndarray::Array2;
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
+use ndarray::{Array1, Array2, ArrayView2};
+use numpy::{
+    IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
+};
 use pyo3::exceptions::PyValueError;
 use pyo3::types::{PyBytes, PyBytesMethods, PyDict, PyDictMethods, PyModule, PyModuleMethods};
 use pyo3::{Bound, PyResult, Python, pyclass, pyfunction, pymethods, pymodule, wrap_pyfunction};
 use serde::{Deserialize, Serialize};
 
-mod nns;
+mod index;
+
+use index::kdtree::KdTree;
+use index::voxel::VoxelGrid;
+
+#[cfg(feature = "kiddo-baseline")]
+use index::kiddo::KiddoTree;
 
 /// Indices and distances of a query's found neighbours, as returned to Python
 type NeighbourArrays<'py> = (Bound<'py, PyArray2<i32>>, Bound<'py, PyArray2<f32>>);
 
+/// Names of the available search methods, as accepted by `OxVoxNNSEngine::new`
+const METHOD_VOXEL: &str = "voxel";
+const METHOD_KDTREE: &str = "kdtree";
+#[cfg(feature = "kiddo-baseline")]
+const METHOD_KIDDO: &str = "kiddo";
+
+/// The spatial index behind an engine, one variant per search method
 #[derive(Serialize, Deserialize)]
-#[pyclass(module = "oxvox")] // module = "blah" required for python to serialise correctly
+enum Backend {
+    Voxel(VoxelGrid),
+    KdTree(KdTree),
+    #[cfg(feature = "kiddo-baseline")]
+    Kiddo(KiddoTree),
+}
+
+impl Backend {
+    /// Build the index named by `method`
+    fn build(
+        method: &str,
+        search_points: ArrayView2<f32>,
+        max_dist: f32,
+        cells_per_radius: u32,
+    ) -> PyResult<Self> {
+        match method {
+            METHOD_VOXEL => Ok(Backend::Voxel(VoxelGrid::new(
+                search_points,
+                max_dist,
+                cells_per_radius,
+            ))),
+            METHOD_KDTREE => Ok(Backend::KdTree(KdTree::new(search_points))),
+            #[cfg(feature = "kiddo-baseline")]
+            METHOD_KIDDO => Ok(Backend::Kiddo(KiddoTree::new(search_points))),
+            other => Err(PyValueError::new_err(format!(
+                "unknown method {other:?}; expected one of {:?}",
+                Self::available_methods()
+            ))),
+        }
+    }
+
+    /// Methods compiled into this build
+    fn available_methods() -> Vec<&'static str> {
+        vec![
+            METHOD_VOXEL,
+            METHOD_KDTREE,
+            #[cfg(feature = "kiddo-baseline")]
+            METHOD_KIDDO,
+        ]
+    }
+
+    fn find_neighbours(
+        &self,
+        query_points: ArrayView2<f32>,
+        num_neighbours: usize,
+        max_dist: f32,
+        epsilon: f32,
+        progress: bool,
+    ) -> (Array2<i32>, Array2<f32>) {
+        match self {
+            Backend::Voxel(grid) => index::find_neighbours(
+                grid,
+                Some(grid.original_indices()),
+                query_points,
+                num_neighbours,
+                max_dist,
+                epsilon,
+                progress,
+            ),
+            Backend::KdTree(tree) => index::find_neighbours(
+                tree,
+                Some(tree.original_indices()),
+                query_points,
+                num_neighbours,
+                max_dist,
+                epsilon,
+                progress,
+            ),
+            #[cfg(feature = "kiddo-baseline")]
+            Backend::Kiddo(tree) => index::find_neighbours(
+                tree,
+                None,
+                query_points,
+                num_neighbours,
+                max_dist,
+                epsilon,
+                progress,
+            ),
+        }
+    }
+
+    fn count_neighbours(
+        &self,
+        query_points: ArrayView2<f32>,
+        max_dist: f32,
+        weight: Option<f32>,
+        progress: bool,
+    ) -> Array1<f32> {
+        match self {
+            Backend::Voxel(grid) => {
+                index::count_neighbours(grid, query_points, max_dist, weight, progress)
+            }
+            Backend::KdTree(tree) => {
+                index::count_neighbours(tree, query_points, max_dist, weight, progress)
+            }
+            #[cfg(feature = "kiddo-baseline")]
+            Backend::Kiddo(tree) => {
+                index::count_neighbours(tree, query_points, max_dist, weight, progress)
+            }
+        }
+    }
+}
+
+/// Rust engine behind `oxvox.nns.OxVoxNNS`
+#[derive(Serialize, Deserialize)]
+#[pyclass(module = "oxvox")] // module = "oxvox" is required for pickling to find the class
 struct OxVoxNNSEngine {
-    search_points: Array2<f32>,       // (N, 3)
-    points_by_voxel: nns::VoxelIndex, // maps voxel_coords -> indices of search points in that voxel
-    voxel_offsets: Array2<i32>,       // (27, 3)
+    backend: Backend,
     max_dist: f32,
+    method: String,
+    cells_per_radius: u32,
 }
 
 /// Build a rayon thread pool for a single query call
@@ -28,9 +147,8 @@ struct OxVoxNNSEngine {
 ///         of logical CPUs), matching the Python-facing `num_threads=0` convention
 ///
 /// Returns:
-///     A thread pool scoped to this call; every call gets its own pool, so
-///     `num_threads` is honoured independently each time, rather than only on the
-///     first call (as it was when we built rayon's global pool once per process)
+///     A thread pool scoped to this call, so `num_threads` is honoured independently
+///     each time rather than only on the first call
 fn _build_thread_pool(num_threads: usize) -> rayon::ThreadPool {
     rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
@@ -96,25 +214,79 @@ pub fn indices_by_field<'py>(
 
 #[pymethods]
 impl OxVoxNNSEngine {
-    /// Construct OxVoxNNS object
+    /// Construct the engine, building the spatial index over the search points
     ///
     /// Args:
-    ///     search_points: Points to search for neighbours amongst
-    ///     max_dist: Maximum distance to neighbouring point for it to be considered (i.e. search radius)
+    ///     search_points: Points to search for neighbours amongst (N, 3)
+    ///     max_dist: Search radius; neighbours at or beyond it are ignored
+    ///     method: Search method: "voxel" (uniform grid) or "kdtree"
+    ///     cells_per_radius: For the voxel method, how many grid cells span one radius
     #[new]
-    fn new(search_points: PyReadonlyArray2<f32>, max_dist: f32) -> Self {
-        // Convert search points to rust ndarray
-        let search_points = search_points.as_array().to_owned();
+    #[pyo3(signature = (search_points, max_dist, method = "voxel", cells_per_radius = 1))]
+    fn new(
+        py: Python<'_>,
+        search_points: PyReadonlyArray2<f32>,
+        max_dist: f32,
+        method: &str,
+        cells_per_radius: u32,
+    ) -> PyResult<Self> {
+        if max_dist <= 0.0 || !max_dist.is_finite() {
+            return Err(PyValueError::new_err(format!(
+                "max_dist must be a positive finite number, got {max_dist}"
+            )));
+        }
+        if search_points.shape()[1] != 3 {
+            return Err(PyValueError::new_err(format!(
+                "search_points must have shape (N, 3), got {:?}",
+                search_points.shape()
+            )));
+        }
+        let search_points = search_points.as_array();
 
-        // Perform initial passes (one-time stuff)
-        let (points_by_voxel, voxel_offsets) = nns::initialise_nns(&search_points, max_dist);
+        // Building the index is a heavy, purely-Rust operation, so let other Python
+        // threads run in the meantime
+        let backend =
+            py.detach(|| Backend::build(method, search_points, max_dist, cells_per_radius))?;
 
-        // Construct the NNS object with computed values required for querying
-        OxVoxNNSEngine {
-            search_points,
-            points_by_voxel,
-            voxel_offsets,
+        Ok(OxVoxNNSEngine {
+            backend,
             max_dist,
+            method: method.to_owned(),
+            cells_per_radius,
+        })
+    }
+
+    /// Search method this engine was built with
+    #[getter]
+    fn method(&self) -> &str {
+        &self.method
+    }
+
+    /// Number of indexed search points
+    fn __len__(&self) -> usize {
+        match &self.backend {
+            Backend::Voxel(grid) => index::NeighbourIndex::len(grid),
+            Backend::KdTree(tree) => index::NeighbourIndex::len(tree),
+            #[cfg(feature = "kiddo-baseline")]
+            Backend::Kiddo(tree) => index::NeighbourIndex::len(tree),
+        }
+    }
+
+    /// Statistics about the voxel grid's occupancy, for choosing between methods
+    ///
+    /// Returns:
+    ///     Dict with `num_cells`, `max_points_per_cell` and `mean_points_per_cell`,
+    ///     or None for methods that don't use a grid
+    fn grid_stats<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        match &self.backend {
+            Backend::Voxel(grid) => {
+                let stats = PyDict::new(py);
+                stats.set_item("num_cells", grid.num_cells())?;
+                stats.set_item("max_points_per_cell", grid.max_points_per_cell())?;
+                stats.set_item("mean_points_per_cell", grid.mean_points_per_cell())?;
+                Ok(Some(stats))
+            }
+            _ => Ok(None),
         }
     }
 
@@ -125,37 +297,42 @@ impl OxVoxNNSEngine {
     ///     num_neighbours: Maximum number of neighbours to search for
     ///     num_threads: Number of parallel threads to use for this call. `0` uses
     ///         rayon's default (all available CPUs)
-    ///     epsilon: Neighbours within this distance are accepted without further sorting
+    ///     epsilon: Once `num_neighbours` neighbours closer than this have been found,
+    ///         the search for that query point stops early
+    ///     progress: Show a progress bar over query points
     ///
     /// Returns:
-    ///     Indices of neighbouring points for each query point (Q, num_neighbours)
-    ///     Distance from query point to search point for each search point in indices (Q, num_neighbours)
+    ///     Indices of neighbouring points for each query point (Q, num_neighbours), -1 padded
+    ///     Distance from query point to each neighbour (Q, num_neighbours), -1 padded
+    #[pyo3(signature = (query_points, num_neighbours, num_threads = 0, epsilon = 0.0, progress = false))]
     pub fn find_neighbours<'py>(
         &self,
         py: Python<'py>,
         query_points: PyReadonlyArray2<'py, f32>,
-        num_neighbours: i32,
+        num_neighbours: usize,
         num_threads: usize,
         epsilon: f32,
+        progress: bool,
     ) -> PyResult<NeighbourArrays<'py>> {
-        // Convert query points to rust ndarray
+        if query_points.shape()[1] != 3 {
+            return Err(PyValueError::new_err(format!(
+                "query_points must have shape (Q, 3), got {:?}",
+                query_points.shape()
+            )));
+        }
         let query_points = query_points.as_array();
 
-        // Release the GIL for the duration of the parallel search, so other Python
-        // threads aren't blocked while we crunch through the query, and scope this
-        // call's rayon thread pool to just this call, so num_threads is honoured on
-        // every call, not just the first
+        // Release the GIL for the duration of the parallel search, and scope this
+        // call's rayon thread pool to just this call so num_threads is honoured
         let (indices, distances) = py.detach(|| {
             let pool = _build_thread_pool(num_threads);
             pool.install(|| {
-                nns::find_neighbours(
+                self.backend.find_neighbours(
                     query_points,
-                    &self.search_points,
-                    &self.points_by_voxel,
-                    &self.voxel_offsets,
                     num_neighbours,
                     self.max_dist,
                     epsilon,
+                    progress,
                 )
             })
         });
@@ -163,8 +340,8 @@ impl OxVoxNNSEngine {
         Ok((indices.into_pyarray(py), distances.into_pyarray(py)))
     }
 
-    /// Find how many neighbours exist within the search radius for each query point,
-    /// optionally weighting each neighbour's contribution by its distance from the query point
+    /// Count how many neighbours exist within the search radius of each query point,
+    /// optionally weighting each neighbour's contribution by its distance
     ///
     /// Args:
     ///     query_points: Points to search for neighbours of (Q, 3)
@@ -174,19 +351,20 @@ impl OxVoxNNSEngine {
     ///         be non-negative), each neighbour within the search radius instead
     ///         contributes `(1 - distance / search_radius).powf(p)`, so contributions run
     ///         from 1 at zero distance down to 0 at the search radius
+    ///     progress: Show a progress bar over query points
     ///
     /// Returns:
     ///     Number of neighbours (or distance-weighted sum) within radius for each query
     ///     point (Q,)
+    #[pyo3(signature = (query_points, num_threads = 0, distance_weight_factor = None, progress = false))]
     pub fn count_neighbours<'py>(
         &self,
         py: Python<'py>,
         query_points: PyReadonlyArray2<'py, f32>,
         num_threads: usize,
         distance_weight_factor: Option<f32>,
+        progress: bool,
     ) -> PyResult<Bound<'py, PyArray1<f32>>> {
-        // A negative weighting factor doesn't correspond to a sensible kernel, so reject
-        // it here, before it ever reaches the engine
         if let Some(p) = distance_weight_factor
             && p < 0.0
         {
@@ -194,22 +372,22 @@ impl OxVoxNNSEngine {
                 "distance_weight_factor must be non-negative",
             ));
         }
-
-        // Convert query points to rust ndarray
+        if query_points.shape()[1] != 3 {
+            return Err(PyValueError::new_err(format!(
+                "query_points must have shape (Q, 3), got {:?}",
+                query_points.shape()
+            )));
+        }
         let query_points = query_points.as_array();
 
-        // Release the GIL for the duration of the parallel search, and scope this
-        // call's rayon thread pool to just this call (see find_neighbours above)
         let counts = py.detach(|| {
             let pool = _build_thread_pool(num_threads);
             pool.install(|| {
-                nns::count_neighbours(
+                self.backend.count_neighbours(
                     query_points,
-                    &self.search_points,
-                    &self.points_by_voxel,
-                    &self.voxel_offsets,
                     self.max_dist,
                     distance_weight_factor,
+                    progress,
                 )
             })
         });
@@ -231,19 +409,32 @@ impl OxVoxNNSEngine {
         ))
     }
 
-    /// How to construct a new OxVoxNNS object from an existing one (needed for pickling)
-    pub fn __getnewargs__<'py>(&self, py: Python<'py>) -> (Bound<'py, PyArray2<f32>>, f32) {
-        (self.search_points.clone().into_pyarray(py), self.max_dist)
+    /// Arguments pickle passes to `__new__` before `__setstate__` restores the real
+    /// state. An empty pointcloud keeps that placeholder construction trivial
+    pub fn __getnewargs__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> (Bound<'py, PyArray2<f32>>, f32, String, u32) {
+        (
+            Array2::<f32>::zeros((0, 3)).into_pyarray(py),
+            self.max_dist,
+            self.method.clone(),
+            self.cells_per_radius,
+        )
     }
+}
+
+/// Names of the search methods compiled into this build
+#[pyfunction]
+fn available_methods() -> Vec<&'static str> {
+    Backend::available_methods()
 }
 
 #[pymodule]
 #[pyo3(name = "_oxvox")]
 fn oxvox(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // All our python interface is in the OxVoxEngine class
     m.add_class::<OxVoxNNSEngine>()?;
     m.add_function(wrap_pyfunction!(indices_by_field, m)?)?;
-
-    // Return a successful PyResult if the module compiled successfully
+    m.add_function(wrap_pyfunction!(available_methods, m)?)?;
     Ok(())
 }

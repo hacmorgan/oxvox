@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.1.0 (unreleased)
+
+### Added
+- `OxVoxNNS(..., method="kdtree")`: a hand-rolled bucketed KD-tree as an alternative to
+  the voxel grid. Both backends share one query engine and are tested against a
+  brute-force reference; results are identical up to tie ordering.
+- `OxVoxNNS(..., cells_per_radius=n)`: for the voxel method, how many grid cells span
+  one search radius (default 1, the classic 27-cell neighbourhood).
+- `OxVoxNNS.method`, `len(nns)`, `OxVoxNNS.grid_stats()` (cell count, max and mean points
+  per cell) and `oxvox.nns.available_methods()`.
+- `progress=True` on `find_neighbours`/`count_neighbours` shows a progress bar; bars are
+  now off by default.
+- Cargo feature `kiddo-baseline` compiles in the `kiddo` crate as `method="kiddo"` for
+  benchmarking (not in released wheels).
+
+### Changed
+- Voxel backend rewritten for speed. Points are stored sorted by cell (CSR layout)
+  instead of a hashmap of per-cell vectors; the scan compares squared distances and
+  keeps only the k best candidates in a bounded heap (was: sqrt per candidate and a heap
+  of every candidate in range); cells whose bounding box is beyond the current best
+  candidate are skipped; queries are processed in parallel chunks that write straight
+  into the output arrays. Voxel coordinates now use `floor`, so cells on the x/y/z = 0
+  planes are no longer twice as wide (which made queries near those planes scan up to
+  8x more candidates). Measured against 0.7.2 on the historical 4M-point scenarios:
+  queries 3-11x faster, builds up to 1.6x faster, identical neighbours and distances.
+- Radius comparisons are now done on squared distances (`d² < r²` rather than
+  `sqrt(d²) < r`). A search point whose distance is within float32 rounding of the
+  radius can therefore flip in or out compared with 1.0.0; over 1.5 billion counted
+  neighbours in the clustered benchmark, 240 flipped.
+- Rust engine restructured into `src/index/{mod,voxel,kdtree}.rs`; `src/nns.rs` removed.
+- Input arrays are made C-contiguous before being passed to Rust, so sliced/transposed
+  views work.
+
+### Breaking
+- `OxVoxNNSEngine` constructor and method signatures changed (keyword arguments
+  `method`, `cells_per_radius`, `progress`). The Python `OxVoxNNS` wrapper is
+  backwards compatible for positional use. Pickles from 1.0.0 do not load in 1.1.0.
+
 ## 1.0.0 (2026-09-17)
 
 ### Added

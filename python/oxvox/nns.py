@@ -2,31 +2,45 @@
 Python wrapper around Rust NNS engine for typing stubs and interpreter help
 """
 
-
-from typing import Tuple
-from functools import partial
+from typing import Literal
 
 import numpy as np
-from numpy.lib.recfunctions import structured_to_unstructured
 import numpy.typing as npt
+from numpy.lib.recfunctions import structured_to_unstructured
 
-from oxvox._oxvox import OxVoxNNSEngine
+from oxvox._oxvox import OxVoxNNSEngine, available_methods
+
+# Search methods the Rust engine can be built with, plus "auto" which picks one
+Method = Literal["voxel", "kdtree", "kiddo", "auto"]
 
 
 class OxVoxNNS:
     """
-    A hybrid-ish nearest neighbour search implemented in rust, tailored towards
-    consistent performance, especially on difficult inputs for KDTrees
+    Radius-bounded nearest neighbour search implemented in Rust, with a choice of
+    spatial index behind it
+
+    Methods:
+        "voxel": Uniform grid of cells of side ``search_radius / cells_per_radius``.
+            Search points are stored sorted by cell, and a query scans the cells that
+            could hold a neighbour, skipping cells whose bounding box is already
+            further away than the current best candidate. Consistent performance on
+            dense, clustered clouds where KD-trees struggle
+        "kdtree": Bucketed KD-tree with median splits on the widest axis. Cheaper on
+            sparse or very non-uniform clouds
+        "kiddo": The ``kiddo`` crate's KD-tree, only present in builds compiled with
+            the ``kiddo-baseline`` cargo feature (used for benchmarking)
+        "auto": Currently resolves to "voxel"; a data-driven heuristic is planned
     """
 
     def __init__(
-        self, search_points: npt.NDArray[np.floating], search_radius: float
+        self,
+        search_points: npt.NDArray[np.floating],
+        search_radius: float,
+        method: Method = "voxel",
+        cells_per_radius: int = 1,
     ) -> None:
         """
         Construct neighbour searcher object
-
-        Internally this groups search points by voxel and constructs a lookup for points
-        by their voxel coordinates
 
         n.b. this class (and the rust object it constructs internally) can be pickled,
         allowing queries to be done in async/parallel contexts if required
@@ -37,23 +51,48 @@ class OxVoxNNS:
                 structured array with "x", "y" and "z" columns at minimum
             search_radius: Maximum distance between points before they are no longer
                 considered neighbours
+            method: Which spatial index to build, see the class docstring
+            cells_per_radius: For the "voxel" method, how many grid cells span one
+                search radius. 1 gives the classic 27-cell neighbourhood; 2 gives
+                smaller cells with less over-scan per query but more cell lookups
         """
         # The rust engine strictly expects 3-column unstructured arrays of 32-bit
-        # floats, so we must convert structured arrays to unstructured and enure we only
-        # have 32-bit values
+        # floats, so we must convert structured arrays to unstructured and ensure we
+        # only have 32-bit values
         search_points = self._sanitise_points(search_points)
 
+        # "auto" is a placeholder until the benchmark-derived heuristic lands
+        resolved_method = "voxel" if method == "auto" else method
+
         # Construct internal rust neighbour searcher
-        self.engine = OxVoxNNSEngine(search_points, search_radius)
+        self.engine = OxVoxNNSEngine(
+            search_points,
+            search_radius,
+            method=resolved_method,
+            cells_per_radius=cells_per_radius,
+        )
+
+    @property
+    def method(self) -> str:
+        """
+        Name of the spatial index this searcher was built with
+        """
+        return self.engine.method
+
+    def __len__(self) -> int:
+        """
+        Number of indexed search points
+        """
+        return len(self.engine)
 
     def find_neighbours(
         self,
         query_points: npt.NDArray[np.floating],
         num_neighbours: int,
         num_threads: int = 0,
-        # epsilon: float = np.finfo(np.float32).eps,
         epsilon: float = 0,
-    ) -> Tuple[npt.NDArray[np.int32], npt.NDArray[np.float32]]:
+        progress: bool = False,
+    ) -> tuple[npt.NDArray[np.int32], npt.NDArray[np.float32]]:
         """
         Find neighbours in search points within range for all given query points
 
@@ -64,10 +103,11 @@ class OxVoxNNS:
             num_neighbours: Maximum number of neighbours to find, a.k.a. `k`
             num_threads: Number of parallel CPU threads to use in queries. Uses all
                 available CPUs if set to 0
-            epsilon: Any neighbours within this distance of the query point are accepted
-                automatically (skips sorting). Even at its default value of float32 eps
-                (0.00000012), this can help prevent the search from getting bogged down
-                in extremely dense regions
+            epsilon: Once `num_neighbours` neighbours closer than this distance have
+                been found for a query point, its search stops early (an approximate
+                mode). A small positive value can help prevent the search getting
+                bogged down in extremely dense regions
+            progress: Show a progress bar over query points
 
         Returns:
             Indices of neighbouring search points. -1 where neighbours can't be found
@@ -77,8 +117,9 @@ class OxVoxNNS:
         return self.engine.find_neighbours(
             self._sanitise_points(query_points),
             num_neighbours,
-            num_threads,
-            epsilon,
+            num_threads=num_threads,
+            epsilon=epsilon,
+            progress=progress,
         )
 
     def count_neighbours(
@@ -86,6 +127,7 @@ class OxVoxNNS:
         query_points: npt.NDArray[np.floating],
         num_threads: int = 0,
         distance_weight_factor: float | None = None,
+        progress: bool = False,
     ) -> npt.NDArray[np.uint32 | np.float32]:
         """
         Count neighbours in search points within range for all given query points
@@ -105,11 +147,11 @@ class OxVoxNNS:
             distance_weight_factor: Exponent applied to the normalised distance kernel
                 described above. If `None` (the default), neighbours are counted
                 exactly, with every in-range neighbour contributing 1 regardless of
-                distance. A value of 0 reproduces that same exact count (every in-range
-                neighbour still contributes 1, since anything to the power 0 is 1). A
-                value of 1 gives linear falloff with distance. Larger values concentrate
-                the weight closer to the query point. Must be `None` or non-negative;
+                distance. A value of 0 reproduces that same exact count. A value of 1
+                gives linear falloff with distance. Larger values concentrate the
+                weight closer to the query point. Must be `None` or non-negative;
                 negative values raise `ValueError`
+            progress: Show a progress bar over query points
 
         Returns:
             Neighbour count for each query point (Q,). An array of `uint32` exact
@@ -118,16 +160,26 @@ class OxVoxNNS:
         """
         counts = self.engine.count_neighbours(
             self._sanitise_points(query_points),
-            num_threads,
-            distance_weight_factor,
+            num_threads=num_threads,
+            distance_weight_factor=distance_weight_factor,
+            progress=progress,
         )
         return counts.astype(np.uint32) if distance_weight_factor is None else counts
+
+    def grid_stats(self) -> dict[str, float] | None:
+        """
+        Occupancy statistics of the voxel grid, or None for methods without a grid
+
+        Returns:
+            Dict with `num_cells`, `max_points_per_cell` and `mean_points_per_cell`
+        """
+        return self.engine.grid_stats()
 
     @staticmethod
     def _sanitise_points(points: npt.NDArray[np.floating]) -> npt.NDArray[np.float32]:
         """
-        Prepare pointcloud arrays to be used by rust engine, which expects arrays of
-        32-bit floats
+        Prepare pointcloud arrays to be used by rust engine, which expects C-contiguous
+        (N, 3) arrays of 32-bit floats
 
         Args:
             points: Pointcloud to be sanitised
@@ -135,8 +187,9 @@ class OxVoxNNS:
         Returns:
             Pointcloud, ready to be passed into rust engine
         """
-        return (
-            structured_to_unstructured(points[["x", "y", "z"]], dtype=np.float32)
-            if points.dtype.names is not None
-            else points.astype(np.float32)
-        )
+        if points.dtype.names is not None:
+            points = structured_to_unstructured(points[["x", "y", "z"]], dtype=np.float32)
+        return np.ascontiguousarray(points, dtype=np.float32)
+
+
+__all__ = ["OxVoxNNS", "Method", "available_methods"]

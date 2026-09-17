@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0 (unreleased)
+## 1.0.0 (2026-09-17)
 
 ### Added
 - Distance-weighted neighbour counts: `OxVoxNNS.count_neighbours` takes an optional

@@ -18,6 +18,11 @@ How a measurement is taken:
   competitor (scipy): the exact methods must reproduce its distances, and the
   approximate one gets a recall number. Distance ties make index comparison ambiguous,
   so index sets are only compared on rows whose distances are all distinct.
+- Nothing in the parent process ever calls the Rust extension. The first parallel
+  operation in a process starts rayon's global thread pool, and a process forked after
+  that inherits the pool's bookkeeping without its threads, so the child's first
+  parallel build waits forever on workers that do not exist. Every Rust call therefore
+  happens in a worker, including the radius calibration, through `call_in_worker`.
 - Peak RSS comes from `resource.getrusage` inside the worker, so it covers that
   index's build and queries and nothing else. The worker inherits the parent's pages
   (the dataset among them), so `peak_rss_mb` starts a couple of hundred megabytes above
@@ -396,6 +401,54 @@ def _time_queries(call: Any, options: MeasurementOptions) -> tuple[float, list[f
         samples.append(time.perf_counter() - start)
         del result
     return _median(samples), samples
+
+
+def call_in_worker(function: Any, *arguments: Any, timeout: float = 1800.0) -> Any:
+    """
+    Run a function in a forked worker process and return its result
+
+    This exists to keep the parent process free of the Rust extension: the first
+    parallel operation in a process starts rayon's global thread pool, and anything
+    forked afterwards inherits that pool's bookkeeping but none of its threads, so the
+    child's next parallel build blocks forever. Anything that touches the extension
+    runs in a worker instead, this function included
+
+    Args:
+        function: Callable to run in the worker. It and its arguments are pickled, so
+            they must be importable module-level objects
+        arguments: Positional arguments for `function`
+        timeout: Seconds to wait before giving up on the worker
+
+    Returns:
+        Whatever `function` returned
+    """
+    context = multiprocessing.get_context("fork")
+    result_queue = context.Queue()
+    worker = context.Process(
+        target=_call_and_reply, args=(result_queue, function, arguments), daemon=True
+    )
+    worker.start()
+    try:
+        return result_queue.get(timeout=timeout)
+    except queue_module.Empty as error:
+        raise RuntimeError(f"worker running {function!r} produced no result") from error
+    finally:
+        worker.join(timeout=30.0)
+        if worker.is_alive():
+            worker.kill()
+            worker.join(timeout=30.0)
+
+
+def _call_and_reply(result_queue: Any, function: Any, arguments: tuple[Any, ...]) -> None:
+    """
+    Worker entry point for `call_in_worker`: call the function, send the result back
+
+    Args:
+        result_queue: Queue the result is pushed onto
+        function: Callable to run
+        arguments: Positional arguments for `function`
+    """
+    result_queue.put(function(*arguments))
 
 
 def _worker_block(

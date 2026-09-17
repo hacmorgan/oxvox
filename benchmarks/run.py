@@ -40,6 +40,8 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
+from functools import partial
+
 from benchmarks import generators, harness
 from benchmarks.competitors import available_competitors
 
@@ -233,6 +235,21 @@ def real_radius_plans() -> list[harness.RadiusPlan]:
     ]
 
 
+def _ignore_points_real_radius_plans(
+    points: npt.NDArray[np.float32],
+) -> list[harness.RadiusPlan]:
+    """
+    Radius plans for a real scan, which need no calibration
+
+    Args:
+        points: The cloud, ignored: the real radii are physical lengths
+
+    Returns:
+        The radius plans, ascending
+    """
+    return real_radius_plans()
+
+
 def _parse_real_pointcloud(argument: str) -> tuple[str, Path]:
     """
     Split a `--real-pointcloud LABEL=PATH` argument
@@ -364,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
                     "load": lambda name=dataset_name, count=num_points: generators.generate(
                         name, count
                     ),
-                    "plan": lambda cloud: synthetic_radius_plans(cloud, density_targets),
+                    "plan": partial(synthetic_radius_plans, density_targets=density_targets),
                 }
             )
     for label, path in arguments.real_pointclouds:
@@ -385,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
                             + ("" if count == len(cloud) else " (random subsample)")
                         ),
                     ),
-                    "plan": lambda cloud: real_radius_plans(),
+                    "plan": _ignore_points_real_radius_plans,
                 }
             )
 
@@ -401,11 +418,15 @@ def main(argv: list[str] | None = None) -> int:
             (time.monotonic() - benchmark_start) / 60.0,
         )
         cloud = group["load"]()
+
+        # The radius calibration queries the Rust extension, which must not happen in
+        # this process: see `harness.call_in_worker`
+        radius_plans = harness.call_in_worker(group["plan"], cloud["points"])
         results = harness.benchmark_group(
             dataset_label=group["label"],
             description=cloud["description"],
             points=cloud["points"],
-            radius_plans=group["plan"](cloud["points"]),
+            radius_plans=radius_plans,
             num_neighbours_values=neighbour_counts,
             query_counts=query_counts,
             competitor_keys=competitor_keys,

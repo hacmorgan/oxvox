@@ -23,3 +23,8 @@ rayon = "1.12"
 serde = {version = "1.0.229", features = ["derive"]}
 indicatif = {version = "0.18", features = ["rayon"]}
 ahash = {version = "0.8.8", features = ["serde"]}
+kiddo = {version = "6.3", optional = true, features = ["serde"]}
+
+[features]
+# Binds the `kiddo` crate as an extra "kiddo" search method, used as a benchmark baseline
+kiddo-baseline = ["dep:kiddo"]

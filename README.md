@@ -50,10 +50,26 @@ Unique value: (4,) at row indices [4 5]
 ```
 
 ### Nearest Neighbour Search (NNS)
-`OxVoxNNS` buckets `search_points` into voxels of side `search_radius`, then answers
-queries by scanning the 27-voxel neighbourhood around each query point. Construct one
-`OxVoxNNS` per pointcloud and reuse it for as many queries as needed (e.g. to query in
-batches, or to distribute the object across processes: it pickles):
+`OxVoxNNS` builds a spatial index over `search_points` and answers radius-bounded
+k-nearest-neighbour queries against it. Construct one `OxVoxNNS` per pointcloud and
+reuse it for as many queries as needed (e.g. to query in batches, or to distribute the
+object across processes: it pickles).
+
+Two indices are available via the `method` argument:
+
+- `"voxel"` (default): a uniform grid of cells of side `search_radius / cells_per_radius`,
+  stored sorted by cell so each cell is one contiguous slice. A query scans only the
+  cells that could hold a neighbour, skipping any whose bounding box is already farther
+  away than its current best candidate. Its cost per query is governed by local
+  density, not by the shape of the cloud, so it stays consistent on dense, clustered
+  data where KD-trees degrade.
+- `"kdtree"`: a bucketed KD-tree (median splits on the widest axis, 16-point leaves).
+  Cheaper on sparse or very non-uniform clouds, or when the search radius is large
+  relative to the point spacing.
+
+`method="auto"` currently resolves to `"voxel"`; a heuristic derived from benchmarks is
+planned. `grid_stats()` exposes the voxel grid's occupancy (cell count, max and mean
+points per cell) for making that choice yourself.
 ```python
 import numpy as np
 from oxvox.nns import OxVoxNNS
@@ -63,7 +79,8 @@ SEARCH_RADIUS = 0.05
 search_points = np.random.random((NUM_POINTS, 3)).astype(np.float32)
 query_points = np.random.random((NUM_POINTS, 3)).astype(np.float32)
 
-nns = OxVoxNNS(search_points, SEARCH_RADIUS)
+nns = OxVoxNNS(search_points, SEARCH_RADIUS)            # method="voxel"
+tree = OxVoxNNS(search_points, SEARCH_RADIUS, method="kdtree")
 
 # Find up to `num_neighbours` nearest neighbours per query point. `indices`/`distances`
 # are (Q, num_neighbours) arrays, padded with -1 where fewer neighbours were found
@@ -80,9 +97,13 @@ weighted_counts = nns.count_neighbours(query_points, distance_weight_factor=1.0)
 ```
 
 `find_neighbours` and `count_neighbours` both take a `num_threads` argument (default
-`0`, meaning "use all available CPUs"); `find_neighbours` also takes an `epsilon`,
-below which a candidate neighbour is accepted without further sorting, which can help
-avoid getting bogged down in very dense regions of the search points.
+`0`, meaning "use all available CPUs") and a `progress` flag; `find_neighbours` also
+takes an `epsilon`: once `num_neighbours` neighbours closer than `epsilon` have been
+found for a query point, its search stops early, which can help avoid getting bogged
+down in very dense regions of the search points (results are then approximate).
+
+Both methods return identical results (up to tie ordering); they are tested against a
+brute-force reference and against each other.
 
 
 ## Tests

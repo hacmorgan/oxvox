@@ -15,11 +15,15 @@ Subsequent compilations should be much shorter
 
 import pickle
 
+import pickle
+
 import numpy as np
-import numpy.lib.recfunctions as rf
 import pytest
 
-from oxvox.nns import OxVoxNNS
+from oxvox.nns import OxVoxNNS, available_methods
+
+# Every search method compiled into this build gets the same test suite
+METHODS = available_methods()
 
 
 TEST_ARRAY = np.arange(9, dtype=np.float32).reshape((3, 3))
@@ -37,35 +41,35 @@ TEST_SEARCH_POINTS = np.array(
 )
 
 
-def test_find_neighbours() -> None:
+@pytest.mark.parametrize("method", METHODS)
+def test_find_neighbours(method: str) -> None:
     """
     Test a simple case of finding neighbours in a small pointcloud
     """
     query_points = TEST_SEARCH_POINTS[0].reshape(1, -1)
     num_neighbours = 3
     max_dist = 4.0
-    voxel_size = 0.3
 
-    nns = OxVoxNNS(TEST_SEARCH_POINTS, max_dist)
+    nns = OxVoxNNS(TEST_SEARCH_POINTS, max_dist, method=method)
+    assert nns.method == method
+    assert len(nns) == len(TEST_SEARCH_POINTS)
     indices, distances = nns.find_neighbours(query_points, num_neighbours)
 
     assert np.all(indices == [0, 1, 2])
     assert np.allclose(distances, [0.0, 0.173, 3.410], atol=0.001)
 
 
-def test_count_neighbours() -> None:
+@pytest.mark.parametrize("method", METHODS)
+def test_count_neighbours(method: str) -> None:
     """
     Test a simple case of counting neighbours in a small pointcloud
     """
     query_points = TEST_SEARCH_POINTS
-    num_neighbours = 3
-    max_dist = 2.0
-    voxel_size = 0.3
 
-    nns = OxVoxNNS(TEST_SEARCH_POINTS, 2.0)
+    nns = OxVoxNNS(TEST_SEARCH_POINTS, 2.0, method=method)
     assert np.all(nns.count_neighbours(query_points) == [2] * 4)
 
-    nns = OxVoxNNS(TEST_SEARCH_POINTS, 4.0)
+    nns = OxVoxNNS(TEST_SEARCH_POINTS, 4.0, method=method)
     assert np.all(nns.count_neighbours(query_points) == [4] * 4)
 
     counts_none = nns.count_neighbours(query_points, distance_weight_factor=None)
@@ -157,7 +161,8 @@ def test_count_neighbours_negative_weight_factor_raises() -> None:
         nns.count_neighbours(TEST_SEARCH_POINTS, distance_weight_factor=-1.0)
 
 
-def test_count_neighbours_randomised_brute_force() -> None:
+@pytest.mark.parametrize("method", METHODS)
+def test_count_neighbours_randomised_brute_force(method: str) -> None:
     """
     Randomised brute-force cross-check of the weighted kernel against a pure-numpy
     pairwise-distance reference implementation, for several values of p
@@ -166,7 +171,7 @@ def test_count_neighbours_randomised_brute_force() -> None:
     points = rng.random((1000, 3), dtype=np.float32)
     search_radius = 0.15
 
-    nns = OxVoxNNS(points, search_radius)
+    nns = OxVoxNNS(points, search_radius, method=method)
 
     # Full pairwise distance matrix via broadcasting (1000 x 1000 x 3 is small enough)
     distances = np.linalg.norm(
@@ -196,7 +201,8 @@ def test_count_neighbours_randomised_brute_force() -> None:
         assert np.allclose(actual, expected, atol=1e-3, rtol=1e-4)
 
 
-def test_pickle_roundtrip_preserves_query_results() -> None:
+@pytest.mark.parametrize("method", METHODS)
+def test_pickle_roundtrip_preserves_query_results(method: str) -> None:
     """
     Pickling and unpickling an OxVoxNNS must be transparent: querying the unpickled
     object must give exactly the same results as querying the original, for both
@@ -211,7 +217,7 @@ def test_pickle_roundtrip_preserves_query_results() -> None:
     query_points = rng.random((50, 3), dtype=np.float32)
     search_radius = 0.2
 
-    nns = OxVoxNNS(search_points, search_radius)
+    nns = OxVoxNNS(search_points, search_radius, method=method)
     unpickled_nns = pickle.loads(pickle.dumps(nns))
 
     original_indices, original_distances = nns.find_neighbours(query_points, 5)
@@ -228,7 +234,8 @@ def test_pickle_roundtrip_preserves_query_results() -> None:
     assert np.array_equal(original_counts, unpickled_counts)
 
 
-def test_count_neighbours_plain_count_clustered_and_negative_coords() -> None:
+@pytest.mark.parametrize("method", METHODS)
+def test_count_neighbours_plain_count_clustered_and_negative_coords(method: str) -> None:
     """
     Regression test for the plain count on a harder distribution: dense Gaussian
     clusters straddling the origin planes (negative and positive coordinates), which
@@ -246,7 +253,7 @@ def test_count_neighbours_plain_count_clustered_and_negative_coords() -> None:
     search_radius = 0.04
     query_points = points[::3]
 
-    nns = OxVoxNNS(points, search_radius)
+    nns = OxVoxNNS(points, search_radius, method=method)
     counts = nns.count_neighbours(query_points, distance_weight_factor=None)
 
     distances = np.linalg.norm(
@@ -257,3 +264,78 @@ def test_count_neighbours_plain_count_clustered_and_negative_coords() -> None:
     assert np.array_equal(counts, expected_counts)
     # Sanity: the clusters are dense enough that this isn't a trivial all-ones test
     assert counts.max() > 5
+
+
+def test_unknown_method_raises() -> None:
+    """
+    An unrecognised method name must raise ValueError from the Rust engine
+    """
+    with pytest.raises(ValueError):
+        OxVoxNNS(TEST_SEARCH_POINTS, 1.0, method="octree")  # type: ignore[arg-type]
+
+
+def test_auto_method_resolves_to_voxel() -> None:
+    """
+    Until the benchmark-derived heuristic lands, "auto" means "voxel"
+    """
+    nns = OxVoxNNS(TEST_SEARCH_POINTS, 1.0, method="auto")
+    assert nns.method == "voxel"
+
+
+def test_grid_stats_only_for_voxel_method() -> None:
+    """
+    Grid occupancy statistics are reported for the voxel method and None otherwise
+    """
+    rng = np.random.default_rng(seed=2)
+    points = rng.random((500, 3), dtype=np.float32)
+
+    stats = OxVoxNNS(points, 0.5, method="voxel").grid_stats()
+    assert stats is not None
+    assert set(stats) == {"num_cells", "max_points_per_cell", "mean_points_per_cell"}
+    assert 1 <= stats["num_cells"] <= 8
+    assert stats["max_points_per_cell"] >= stats["mean_points_per_cell"]
+
+    assert OxVoxNNS(points, 0.5, method="kdtree").grid_stats() is None
+
+
+@pytest.mark.parametrize("method", METHODS)
+@pytest.mark.parametrize("cells_per_radius", [1, 2])
+def test_methods_agree_with_brute_force_knn(method: str, cells_per_radius: int) -> None:
+    """
+    Every method must return the same k nearest neighbours (as sets, with matching
+    sorted distances) as a brute-force numpy reference, on a cloud straddling the origin
+    """
+    rng = np.random.default_rng(seed=4)
+    points = (rng.random((3000, 3), dtype=np.float32) - 0.5) * 2
+    queries = (rng.random((200, 3), dtype=np.float32) - 0.5) * 2.2
+    search_radius = 0.25
+    num_neighbours = 12
+
+    nns = OxVoxNNS(points, search_radius, method=method, cells_per_radius=cells_per_radius)
+    indices, distances = nns.find_neighbours(queries, num_neighbours)
+
+    all_distances = np.linalg.norm(queries[:, None, :] - points[None, :, :], axis=-1)
+    for q in range(len(queries)):
+        in_range = np.flatnonzero(all_distances[q] < search_radius)
+        expected = in_range[np.argsort(all_distances[q, in_range])][:num_neighbours]
+        found = indices[q][indices[q] >= 0]
+        assert len(found) == len(expected)
+        assert np.allclose(np.sort(distances[q][: len(found)]), all_distances[q, expected], atol=1e-5)
+        assert np.all(np.diff(distances[q][: len(found)]) >= 0), "results must be nearest-first"
+        assert set(found.tolist()) == set(expected.tolist())
+        assert np.all(indices[q][len(found):] == -1)
+        assert np.all(distances[q][len(found):] == -1.0)
+
+
+def test_structured_and_float64_inputs_are_accepted() -> None:
+    """
+    Structured arrays with x/y/z fields and float64 arrays are converted for the engine
+    """
+    rng = np.random.default_rng(seed=6)
+    points = rng.random((100, 3))
+    structured = np.zeros(100, dtype=[("x", np.float64), ("y", np.float64), ("z", np.float64), ("i", np.int32)])
+    structured["x"], structured["y"], structured["z"] = points.T
+
+    from_unstructured = OxVoxNNS(points, 0.3).count_neighbours(points)
+    from_structured = OxVoxNNS(structured, 0.3).count_neighbours(structured)
+    assert np.array_equal(from_unstructured, from_structured)

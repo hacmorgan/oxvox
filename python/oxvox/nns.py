@@ -85,31 +85,43 @@ class OxVoxNNS:
         self,
         query_points: npt.NDArray[np.floating],
         num_threads: int = 0,
-    ) -> npt.NDArray[np.uint32]:
+        distance_weight_factor: float | None = None,
+    ) -> npt.NDArray[np.uint32 | np.float32]:
         """
         Count neighbours in search points within range for all given query points
+
+        Each neighbour's contribution to the count can optionally be weighted by its
+        distance from the query point, using the normalised kernel
+        `w = (1 - distance / search_radius) ** distance_weight_factor`. This kernel is
+        exactly 1 at zero distance and falls to 0 at the search radius; neighbours at or
+        beyond the search radius never contribute
 
         Args:
             query_points: Points to search for neighbours of. Can be given as a 2D
                 unstructured (i.e. conventional) array with 3 columns, or as a
                 structured array with "x", "y" and "z" columns at minimum
-            num_neighbours: Maximum number of neighbours to find, a.k.a. `k`
             num_threads: Number of parallel CPU threads to use in queries. Uses all
                 available CPUs if set to 0
-            epsilon: Any neighbours within this distance of the query point are accepted
-                automatically (skips sorting). Even at its default value of float32 eps
-                (0.00000012), this can help prevent the search from getting bogged down
-                in extremely dense regions
+            distance_weight_factor: Exponent applied to the normalised distance kernel
+                described above. If `None` (the default), neighbours are counted
+                exactly, with every in-range neighbour contributing 1 regardless of
+                distance. A value of 0 reproduces that same exact count (every in-range
+                neighbour still contributes 1, since anything to the power 0 is 1). A
+                value of 1 gives linear falloff with distance. Larger values concentrate
+                the weight closer to the query point. Must be `None` or non-negative;
+                negative values raise `ValueError`
 
         Returns:
-            Indices of neighbouring search points. -1 where neighbours can't be found
-            Distance to query point for each search point index. -1.0 where neighbours
-                can't be found
+            Neighbour count for each query point (Q,). An array of `uint32` exact
+            counts when `distance_weight_factor` is `None`, otherwise an array of
+            `float32` distance-weighted sums
         """
-        return self.engine.count_neighbours(
+        counts = self.engine.count_neighbours(
             self._sanitise_points(query_points),
             num_threads,
+            distance_weight_factor,
         )
+        return counts.astype(np.uint32) if distance_weight_factor is None else counts
 
     @staticmethod
     def _sanitise_points(points: npt.NDArray[np.floating]) -> npt.NDArray[np.float32]:

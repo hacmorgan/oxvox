@@ -18,8 +18,8 @@ help: # Show help for each of the Makefile recipes.
 # Unit tests
 ###############
 
-test-python: # Run python tests
-	@python -m pytest --verbose --ignore=third_party python/oxvox/tests
+test-python: # Run python tests (package tests, then the benchmark harness's own)
+	@python -m pytest --verbose --ignore=third_party python/oxvox/tests benchmarks
 
 test-rust: # Run rust unit tests
 	@cargo test

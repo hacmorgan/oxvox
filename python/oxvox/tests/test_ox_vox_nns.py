@@ -20,10 +20,11 @@ import pickle
 import numpy as np
 import pytest
 
-from oxvox.nns import OxVoxNNS, available_methods
+from oxvox.nns import EXACT_METHODS, OxVoxNNS, available_methods
 
-# Every search method compiled into this build gets the same test suite
-METHODS = available_methods()
+# Every exact search method compiled into this build gets the same test suite; the
+# approximate "graph" method gets its own recall tests below
+METHODS = [method for method in available_methods() if method in EXACT_METHODS]
 
 
 TEST_ARRAY = np.arange(9, dtype=np.float32).reshape((3, 3))
@@ -297,6 +298,9 @@ def test_grid_stats_only_for_voxel_method() -> None:
 
     assert OxVoxNNS(points, 0.5, method="kdtree").grid_stats() is None
 
+    hybrid_stats = OxVoxNNS(points, 0.5, method="hybrid", subtree_threshold=16).grid_stats()
+    assert hybrid_stats is not None and hybrid_stats["num_subtrees"] >= 1
+
 
 @pytest.mark.parametrize("method", METHODS)
 @pytest.mark.parametrize("cells_per_radius", [1, 2])
@@ -339,3 +343,43 @@ def test_structured_and_float64_inputs_are_accepted() -> None:
     from_unstructured = OxVoxNNS(points, 0.3).count_neighbours(points)
     from_structured = OxVoxNNS(structured, 0.3).count_neighbours(structured)
     assert np.array_equal(from_unstructured, from_structured)
+
+
+def test_graph_method_is_approximate_but_safe() -> None:
+    """
+    The graph method must never return a point outside the radius, a duplicate, or
+    non-trailing padding, and on uniform data with k <= graph_degree its recall against
+    an exact method must be very high
+    """
+    rng = np.random.default_rng(seed=9)
+    points = rng.random((5000, 3), dtype=np.float32)
+    queries = rng.random((300, 3), dtype=np.float32)
+    search_radius = 0.15
+    num_neighbours = 8
+
+    graph = OxVoxNNS(points, search_radius, method="graph", graph_degree=16)
+    exact = OxVoxNNS(points, search_radius, method="kdtree")
+    assert graph.method == "graph"
+
+    approx_indices, approx_distances = graph.find_neighbours(queries, num_neighbours)
+    exact_indices, _ = exact.find_neighbours(queries, num_neighbours)
+
+    hits = wanted = 0
+    for q in range(len(queries)):
+        found = approx_indices[q][approx_indices[q] >= 0]
+        assert len(set(found.tolist())) == len(found), "duplicate neighbour"
+        assert np.all(approx_indices[q][len(found):] == -1), "padding must be trailing"
+        distances = np.linalg.norm(points[found] - queries[q], axis=1)
+        assert np.all(distances < search_radius)
+        assert np.allclose(np.sort(approx_distances[q][: len(found)]), approx_distances[q][: len(found)])
+        expected = set(exact_indices[q][exact_indices[q] >= 0].tolist())
+        hits += len(expected & set(found.tolist()))
+        wanted += len(expected)
+    assert hits / wanted >= 0.99
+
+    # Approximate counts can only ever undercount
+    assert np.all(graph.count_neighbours(queries) <= exact.count_neighbours(queries))
+
+    # And it pickles like everything else
+    unpickled = pickle.loads(pickle.dumps(graph))
+    assert np.array_equal(unpickled.find_neighbours(queries, num_neighbours)[0], approx_indices)

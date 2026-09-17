@@ -35,7 +35,9 @@ impl KiddoTree {
 }
 
 impl NeighbourIndex for KiddoTree {
-    fn search<V: CandidateVisitor>(&self, query: &Point, visitor: &mut V) {
+    type Scratch = ();
+
+    fn search<V: CandidateVisitor>(&self, query: &Point, visitor: &mut V, _scratch: &mut ()) {
         if self.num_points == 0 {
             return;
         }

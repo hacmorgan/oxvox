@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use super::{CandidateVisitor, NeighbourIndex, Point, distance_sq, to_points};
 
 /// Maximum number of points in a leaf
-const LEAF_SIZE: usize = 16;
+pub(super) const LEAF_SIZE: usize = 16;
 
 /// Subtrees with at least this many points are built on separate rayon tasks
 const PARALLEL_BUILD_THRESHOLD: usize = 1 << 14;
@@ -24,7 +24,7 @@ const LEAF: u8 = 3;
 const MAX_DEPTH: usize = 64;
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
-struct Node {
+pub(super) struct Node {
     /// Split coordinate (unused for leaves)
     split_value: f32,
     /// Axis split on, or `LEAF`
@@ -60,7 +60,7 @@ impl KdTree {
         let nodes = if items.is_empty() {
             Vec::new()
         } else {
-            _build(&mut items, 0)
+            build_nodes(&mut items, 0)
         };
 
         let (points, original_indices) = items.into_iter().unzip();
@@ -84,43 +84,11 @@ impl KdTree {
 }
 
 impl NeighbourIndex for KdTree {
-    fn search<V: CandidateVisitor>(&self, query: &Point, visitor: &mut V) {
-        if self.nodes.is_empty() {
-            return;
-        }
+    type Scratch = ();
 
-        // Depth-first traversal, nearest child first, with the far child parked on an
-        // explicit stack along with a lower bound on its distance from the query
-        let mut stack = [(0u32, 0f32); MAX_DEPTH];
-        let mut depth = 1;
-        while depth > 0 {
-            depth -= 1;
-            let (node_idx, min_distance_sq) = stack[depth];
-            if min_distance_sq >= visitor.bound_sq() {
-                continue;
-            }
-
-            let node = self.nodes[node_idx as usize];
-            if node.split_dim == LEAF {
-                let start = node.first as usize;
-                let end = node.second as usize;
-                for (position, point) in self.points[start..end].iter().enumerate() {
-                    visitor.visit(distance_sq(query, point), (start + position) as u32);
-                }
-                if visitor.done() {
-                    return;
-                }
-            } else {
-                let diff = query[node.split_dim as usize] - node.split_value;
-                let (near, far) = if diff < 0.0 {
-                    (node.first, node.second)
-                } else {
-                    (node.second, node.first)
-                };
-                stack[depth] = (far, min_distance_sq.max(diff * diff));
-                stack[depth + 1] = (near, min_distance_sq);
-                depth += 2;
-            }
+    fn search<V: CandidateVisitor>(&self, query: &Point, visitor: &mut V, _scratch: &mut ()) {
+        if !self.nodes.is_empty() {
+            search_nodes(&self.nodes, 0, &self.points, query, visitor);
         }
     }
 
@@ -129,12 +97,59 @@ impl NeighbourIndex for KdTree {
     }
 }
 
+/// Search the subtree rooted at `nodes[root]`, whose leaves index into `points`
+///
+/// Depth-first traversal, nearest child first, with the far child parked on an explicit
+/// stack along with a lower bound on its distance from the query. Shared with backends
+/// that embed KD subtrees inside another structure
+pub(super) fn search_nodes<V: CandidateVisitor>(
+    nodes: &[Node],
+    root: u32,
+    points: &[Point],
+    query: &Point,
+    visitor: &mut V,
+) {
+    let mut stack = [(root, 0f32); MAX_DEPTH];
+    let mut depth = 1;
+    while depth > 0 {
+        depth -= 1;
+        let (node_idx, min_distance_sq) = stack[depth];
+        if min_distance_sq >= visitor.bound_sq() {
+            continue;
+        }
+
+        let node = nodes[node_idx as usize];
+        if node.split_dim == LEAF {
+            let start = node.first as usize;
+            let end = node.second as usize;
+            for (position, point) in points[start..end].iter().enumerate() {
+                visitor.visit(distance_sq(query, point), (start + position) as u32);
+            }
+            if visitor.done() {
+                return;
+            }
+        } else {
+            let diff = query[node.split_dim as usize] - node.split_value;
+            let (near, far) = if diff < 0.0 {
+                (node.first, node.second)
+            } else {
+                (node.second, node.first)
+            };
+            stack[depth] = (far, min_distance_sq.max(diff * diff));
+            stack[depth + 1] = (near, min_distance_sq);
+            depth += 2;
+        }
+    }
+}
+
 /// Recursively build the subtree over `items`, which occupy positions
 /// `offset..offset + items.len()` of the final point array
 ///
 /// Returns the subtree's nodes with child indices relative to the returned vector
-/// (the root at 0), so subtrees can be built independently and spliced together
-fn _build(items: &mut [(Point, u32)], offset: usize) -> Vec<Node> {
+/// (the root at 0), so subtrees can be built independently and spliced together (see
+/// `shift_node`). Leaves hold absolute point ranges, so `offset` must be where `items`
+/// sits in the final point array
+pub(super) fn build_nodes(items: &mut [(Point, u32)], offset: usize) -> Vec<Node> {
     if items.len() <= LEAF_SIZE {
         return vec![Node {
             split_value: 0.0,
@@ -158,13 +173,13 @@ fn _build(items: &mut [(Point, u32)], offset: usize) -> Vec<Node> {
     let (left_items, right_items) = items.split_at_mut(mid);
     let (left_nodes, right_nodes) = if parallel {
         rayon::join(
-            || _build(left_items, offset),
-            || _build(right_items, offset + mid),
+            || build_nodes(left_items, offset),
+            || build_nodes(right_items, offset + mid),
         )
     } else {
         (
-            _build(left_items, offset),
-            _build(right_items, offset + mid),
+            build_nodes(left_items, offset),
+            build_nodes(right_items, offset + mid),
         )
     };
 
@@ -179,15 +194,23 @@ fn _build(items: &mut [(Point, u32)], offset: usize) -> Vec<Node> {
         first: left_base,
         second: right_base,
     });
-    nodes.extend(left_nodes.into_iter().map(|node| _shift(node, left_base)));
-    nodes.extend(right_nodes.into_iter().map(|node| _shift(node, right_base)));
+    nodes.extend(
+        left_nodes
+            .into_iter()
+            .map(|node| shift_node(node, left_base)),
+    );
+    nodes.extend(
+        right_nodes
+            .into_iter()
+            .map(|node| shift_node(node, right_base)),
+    );
     nodes
 }
 
 /// Shift an internal node's child indices by `base`; leaves hold point ranges and are
 /// left alone
 #[inline(always)]
-fn _shift(node: Node, base: u32) -> Node {
+pub(super) fn shift_node(node: Node, base: u32) -> Node {
     if node.split_dim == LEAF {
         node
     } else {

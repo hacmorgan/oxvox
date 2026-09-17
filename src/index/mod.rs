@@ -7,6 +7,8 @@
 //! writing the output arrays) lives here, so that the backends stay small and every
 //! backend gets identical semantics.
 
+pub mod graph;
+pub mod hybrid;
 pub mod kdtree;
 pub mod voxel;
 
@@ -67,10 +69,21 @@ pub trait CandidateVisitor {
 
 /// A spatial index over a fixed set of search points
 pub trait NeighbourIndex: Send + Sync {
+    /// Per-thread working memory a search needs (visited marks, heaps, ...). `()` for
+    /// backends that need none. The driver creates one per chunk of queries and reuses
+    /// it, so backends never allocate per query
+    type Scratch: Default + Send;
+
     /// Offer every search point that could lie within `visitor.bound_sq()` of `query`
     /// to the visitor (offering points beyond the bound is allowed, missing points
-    /// within it is not), stopping early once `visitor.done()`
-    fn search<V: CandidateVisitor>(&self, query: &Point, visitor: &mut V);
+    /// within it is not, unless the backend is documented as approximate), stopping
+    /// early once `visitor.done()`
+    fn search<V: CandidateVisitor>(
+        &self,
+        query: &Point,
+        visitor: &mut V,
+        scratch: &mut Self::Scratch,
+    );
 
     /// Number of search points in the index
     fn len(&self) -> usize;
@@ -109,6 +122,13 @@ impl KnnCollector {
         self.num_within_epsilon = 0;
     }
 
+    /// The kept candidates as `(squared distance, index)`, nearest first. Sorting
+    /// destroys the heap order, so call `reset` before reusing the collector
+    pub fn sorted(&mut self) -> &[(f32, u32)] {
+        self.heap.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        &self.heap
+    }
+
     /// Write the kept candidates, nearest first, into the output rows; pad with -1
     pub fn write_sorted(
         &mut self,
@@ -116,10 +136,8 @@ impl KnnCollector {
         distances_row: &mut [f32],
         original_indices: Option<&[u32]>,
     ) {
-        self.heap
-            .sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         let mut column = 0;
-        for &(dist_sq, idx) in &self.heap {
+        for &(dist_sq, idx) in self.sorted() {
             let idx = match original_indices {
                 Some(map) => map[idx as usize],
                 None => idx,
@@ -309,9 +327,16 @@ pub fn find_neighbours<I: NeighbourIndex>(
         .into_par_iter()
         .zip(distances.axis_chunks_iter_mut(Axis(0), QUERY_CHUNK_SIZE))
         .zip(query_points.axis_chunks_iter(Axis(0), QUERY_CHUNK_SIZE))
-        .for_each(
-            |((mut indices_chunk, mut distances_chunk), queries_chunk)| {
-                let mut collector = KnnCollector::new(num_neighbours, radius, epsilon);
+        .for_each_init(
+            // One collector and one scratch per rayon worker task, not per chunk: a
+            // backend's scratch can be as large as the whole index (e.g. visited marks)
+            || {
+                (
+                    KnnCollector::new(num_neighbours, radius, epsilon),
+                    I::Scratch::default(),
+                )
+            },
+            |(collector, scratch), ((mut indices_chunk, mut distances_chunk), queries_chunk)| {
                 for ((mut indices_row, mut distances_row), query) in indices_chunk
                     .axis_iter_mut(Axis(0))
                     .zip(distances_chunk.axis_iter_mut(Axis(0)))
@@ -319,7 +344,7 @@ pub fn find_neighbours<I: NeighbourIndex>(
                 {
                     let query = [query[0], query[1], query[2]];
                     collector.reset();
-                    index.search(&query, &mut collector);
+                    index.search(&query, collector, scratch);
                     collector.write_sorted(
                         indices_row
                             .as_slice_mut()
@@ -369,21 +394,23 @@ pub fn count_neighbours<I: NeighbourIndex>(
         .axis_chunks_iter_mut(Axis(0), QUERY_CHUNK_SIZE)
         .into_par_iter()
         .zip(query_points.axis_chunks_iter(Axis(0), QUERY_CHUNK_SIZE))
-        .for_each(|(mut counts_chunk, queries_chunk)| {
-            let mut collector = CountCollector::new(radius, weight);
-            for (count, query) in counts_chunk
-                .iter_mut()
-                .zip(queries_chunk.axis_iter(Axis(0)))
-            {
-                let query = [query[0], query[1], query[2]];
-                collector.reset();
-                index.search(&query, &mut collector);
-                *count = collector.total();
-            }
-            if let Some(bar) = &bar {
-                bar.inc(queries_chunk.shape()[0] as u64);
-            }
-        });
+        .for_each_init(
+            || (CountCollector::new(radius, weight), I::Scratch::default()),
+            |(collector, scratch), (mut counts_chunk, queries_chunk)| {
+                for (count, query) in counts_chunk
+                    .iter_mut()
+                    .zip(queries_chunk.axis_iter(Axis(0)))
+                {
+                    let query = [query[0], query[1], query[2]];
+                    collector.reset();
+                    index.search(&query, collector, scratch);
+                    *count = collector.total();
+                }
+                if let Some(bar) = &bar {
+                    bar.inc(queries_chunk.shape()[0] as u64);
+                }
+            },
+        );
 
     if let Some(bar) = bar {
         bar.finish_and_clear();

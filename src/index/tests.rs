@@ -2,6 +2,8 @@
 
 use ndarray::{Array2, ArrayView2};
 
+use super::graph::KnnGraph;
+use super::hybrid::HybridGrid;
 use super::kdtree::KdTree;
 use super::voxel::VoxelGrid;
 use super::{NeighbourIndex, Point, count_neighbours, distance_sq, find_neighbours, to_points};
@@ -128,7 +130,7 @@ fn assert_matches_brute_force<I: NeighbourIndex>(
     }
 }
 
-/// Run the brute-force comparison on both backends for a search/query pair
+/// Run the brute-force comparison on every exact backend for a search/query pair
 fn check_all_backends(search: ArrayView2<f32>, queries: ArrayView2<f32>, k: usize, radius: f32) {
     for cells_per_radius in [1, 2] {
         let grid = VoxelGrid::new(search, radius, cells_per_radius);
@@ -136,6 +138,19 @@ fn check_all_backends(search: ArrayView2<f32>, queries: ArrayView2<f32>, k: usiz
     }
     let tree = KdTree::new(search);
     assert_matches_brute_force(&tree, tree.original_indices(), search, queries, k, radius);
+    // A low subtree threshold forces subtrees into most cells, so the KD path inside
+    // the grid gets exercised even on small test clouds
+    for subtree_threshold in [4, 64] {
+        let hybrid = HybridGrid::new(search, radius, 1, subtree_threshold);
+        assert_matches_brute_force(
+            &hybrid,
+            hybrid.grid().original_indices(),
+            search,
+            queries,
+            k,
+            radius,
+        );
+    }
 }
 
 #[test]
@@ -190,6 +205,7 @@ fn epsilon_stops_early_with_k_valid_neighbours() {
 
     let grid = VoxelGrid::new(search.view(), radius, 1);
     let tree = KdTree::new(search.view());
+    let hybrid = HybridGrid::new(search.view(), radius, 1, 8);
     let results = [
         find_neighbours(
             &grid,
@@ -203,6 +219,15 @@ fn epsilon_stops_early_with_k_valid_neighbours() {
         find_neighbours(
             &tree,
             Some(tree.original_indices()),
+            queries.view(),
+            k,
+            radius,
+            radius,
+            false,
+        ),
+        find_neighbours(
+            &hybrid,
+            Some(hybrid.grid().original_indices()),
             queries.view(),
             k,
             radius,
@@ -246,4 +271,116 @@ fn kdtree_has_expected_size() {
     assert_eq!(tree.len(), 10_000);
     // Median splits with 16-point leaves: roughly 2 * N / 16 nodes
     assert!(tree.num_nodes() > 1000 && tree.num_nodes() < 3000);
+}
+
+#[test]
+fn hybrid_builds_subtrees_only_in_dense_cells() {
+    let mut rng = Rng(21);
+    // Clusters ~0.1 wide in cells of 0.1: a few cells hold most of each cluster and
+    // exceed the threshold, while the cells the clusters spill into stay sparse
+    let search = clustered_cloud(&mut rng, 3, 400);
+    let hybrid = HybridGrid::new(search.view(), 0.1, 1, 32);
+    assert!(hybrid.num_subtrees() > 0);
+    assert!(hybrid.num_subtrees() <= hybrid.grid().num_cells());
+    assert_eq!(hybrid.len(), 1200);
+
+    // A threshold nothing exceeds means a plain grid
+    let plain = HybridGrid::new(search.view(), 0.1, 1, 10_000);
+    assert_eq!(plain.num_subtrees(), 0);
+}
+
+/// Fraction of brute-force neighbours the graph backend recovers, while asserting the
+/// hard guarantees it must satisfy regardless of recall
+fn graph_recall(
+    search: &Array2<f32>,
+    queries: &Array2<f32>,
+    k: usize,
+    radius: f32,
+    degree: usize,
+) -> f64 {
+    let graph = KnnGraph::new(search.view(), radius, 1, 64, degree);
+    let search_points = to_points(search.view());
+    let (indices, distances) = find_neighbours(
+        &graph,
+        Some(graph.grid().original_indices()),
+        queries.view(),
+        k,
+        radius,
+        0.0,
+        false,
+    );
+    let mut hits = 0usize;
+    let mut wanted = 0usize;
+    for (q, query) in to_points(queries.view()).iter().enumerate() {
+        let expected: std::collections::HashSet<u32> =
+            brute_force(&search_points, query, k, radius)
+                .into_iter()
+                .map(|(_, i)| i)
+                .collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut padding_started = false;
+        for c in 0..k {
+            let idx = indices[[q, c]];
+            if idx < 0 {
+                padding_started = true;
+                assert_eq!(distances[[q, c]], -1.0);
+                continue;
+            }
+            assert!(!padding_started, "-1 padding must be trailing");
+            assert!(seen.insert(idx), "duplicate neighbour returned");
+            let dist = distance_sq(query, &search_points[idx as usize]).sqrt();
+            assert!(dist < radius, "returned a point at or beyond the radius");
+            assert!((dist - distances[[q, c]]).abs() < 1e-5);
+            if c > 0 {
+                assert!(
+                    distances[[q, c]] >= distances[[q, c - 1]],
+                    "results must be nearest-first"
+                );
+            }
+            if expected.contains(&(idx as u32)) {
+                hits += 1;
+            }
+        }
+        wanted += expected.len();
+    }
+    hits as f64 / wanted.max(1) as f64
+}
+
+#[test]
+fn graph_has_high_recall_on_uniform_data_for_small_k() {
+    let mut rng = Rng(99);
+    let search = uniform_cloud(&mut rng, 5000, 0.0, 1.0);
+    let queries = uniform_cloud(&mut rng, 300, 0.0, 1.0);
+    let recall = graph_recall(&search, &queries, 8, 0.15, 16);
+    assert!(recall >= 0.99, "recall {recall}");
+}
+
+#[test]
+fn graph_recall_degrades_gracefully_for_k_above_degree() {
+    let mut rng = Rng(100);
+    let search = uniform_cloud(&mut rng, 5000, 0.0, 1.0);
+    let queries = uniform_cloud(&mut rng, 200, 0.0, 1.0);
+    let recall = graph_recall(&search, &queries, 40, 0.3, 8);
+    assert!(recall >= 0.8, "recall {recall}");
+}
+
+#[test]
+fn graph_counts_never_exceed_the_exact_count() {
+    let mut rng = Rng(101);
+    let search = clustered_cloud(&mut rng, 4, 400);
+    let queries = search.slice(ndarray::s![..;5, ..]);
+    let radius = 0.04;
+    let graph = KnnGraph::new(search.view(), radius, 1, 64, 12);
+    let exact = KdTree::new(search.view());
+    let approx_counts = count_neighbours(&graph, queries, radius, None, false);
+    let exact_counts = count_neighbours(&exact, queries, radius, None, false);
+    let mut total_approx = 0.0;
+    let mut total_exact = 0.0;
+    for (a, e) in approx_counts.iter().zip(exact_counts.iter()) {
+        assert!(a <= e, "approximate count {a} exceeds exact {e}");
+        total_approx += a;
+        total_exact += e;
+    }
+    let recall = total_approx / total_exact;
+    assert!(recall > 0.95, "count recall {recall}");
 }

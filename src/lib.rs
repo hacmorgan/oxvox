@@ -1,12 +1,12 @@
-use std::collections::HashMap;
 use rayon::prelude::*;
+use std::collections::HashMap;
 
 use bincode::{deserialize, serialize};
 use ndarray::Array2;
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray2, PyReadonlyArray1};
-use pyo3::types::{PyBytes, PyModule, PyDict};
-use pyo3::{pyclass, pymethods, pymodule, pyfunction, PyResult, Python, wrap_pyfunction, IntoPy};
 use ndarray::{Array1, ShapeBuilder};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
+use pyo3::types::{PyBytes, PyDict, PyModule};
+use pyo3::{pyclass, pyfunction, pymethods, pymodule, wrap_pyfunction, IntoPy, PyResult, Python};
 use serde::{Deserialize, Serialize};
 
 mod nns;
@@ -50,14 +50,12 @@ pub fn indices_by_field<'py>(
 
     // Populate the hashmap in parallel
     indices_by_id.par_iter_mut().for_each(|(id_, indices_arr)| {
-
         // Our arrays have already been allocated with the correct size, so we simply
         // track how far we are through the array
         let mut hashmap_inner_idx = 0;
 
         // Iterate over unique IDs and fill in the array with indices
         for idx in 0..unique_ids.len() {
-
             // If we find a match, add the index to the array
             if unique_ids[idx] == *id_ as i64 {
                 indices_arr[hashmap_inner_idx] = idx as u64;
@@ -77,7 +75,6 @@ pub fn indices_by_field<'py>(
     }
 
     Ok(dict)
-
 }
 
 #[pymethods]
@@ -157,20 +154,37 @@ impl OxVoxNNSEngine {
         Ok((indices.into_pyarray(py), distances.into_pyarray(py)))
     }
 
-    /// Find how many neighbours exist within the search radius for each query point
+    /// Find how many neighbours exist within the search radius for each query point,
+    /// optionally weighting each neighbour's contribution by its distance from the query point
     ///
     /// Args:
     ///     query_points: Points to search for neighbours of (Q, 3)
     ///     num_threads: Numper of parallel threads to use
+    ///     distance_weight_factor: If `None`, count neighbours exactly. If `Some(p)` (must
+    ///         be non-negative), each neighbour within the search radius instead
+    ///         contributes `(1 - distance / search_radius).powf(p)`, so contributions run
+    ///         from 1 at zero distance down to 0 at the search radius
     ///
     /// Returns:
-    ///     Number of neighbours within radius for each query point (Q,)
+    ///     Number of neighbours (or distance-weighted sum) within radius for each query
+    ///     point (Q,)
     pub fn count_neighbours<'py>(
         &self,
         py: Python<'py>,
         query_points: PyReadonlyArray2<'py, f32>,
         num_threads: usize,
-    ) -> &'py PyArray1<u32> {
+        distance_weight_factor: Option<f32>,
+    ) -> PyResult<&'py PyArray1<f32>> {
+        // A negative weighting factor doesn't correspond to a sensible kernel, so reject
+        // it here, before it ever reaches the engine
+        if let Some(p) = distance_weight_factor {
+            if p < 0.0 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "distance_weight_factor must be non-negative",
+                ));
+            }
+        }
+
         // Convert query points to rust ndarray
         let query_points = query_points.as_array();
 
@@ -189,6 +203,7 @@ impl OxVoxNNSEngine {
                 &self.points_by_voxel,
                 &self.voxel_offsets,
                 self.max_dist,
+                distance_weight_factor,
             )
         } else {
             nns::count_neighbours_singlethread(
@@ -197,10 +212,11 @@ impl OxVoxNNSEngine {
                 &self.points_by_voxel,
                 &self.voxel_offsets,
                 self.max_dist,
+                distance_weight_factor,
             )
         };
 
-        counts.into_pyarray(py)
+        Ok(counts.into_pyarray(py))
     }
 
     /// Implement deserialisation (unpickling) for OxVoxNNS objects
@@ -223,7 +239,6 @@ impl OxVoxNNSEngine {
 #[pymodule]
 #[pyo3(name = "_oxvox")]
 fn oxvox<'py>(_py: Python<'py>, m: &'py PyModule) -> PyResult<()> {
-
     // All our python interface is in the OxVoxEngine class
     m.add_class::<OxVoxNNSEngine>()?;
     m.add_function(wrap_pyfunction!(indices_by_field, m)?)?;

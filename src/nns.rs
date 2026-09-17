@@ -391,23 +391,27 @@ fn _find_query_point_neighbours(
     }
 }
 
-/// Count the nearest neighbours within a given radius for each query point
+/// Count (optionally distance-weighted) neighbours within a given radius for each query point
 ///
 /// Args:
 ///     search_points: Pointcloud we are searching for neighbours within (S, 3)
 ///     query_points: Points we are searching for the neighbours of (Q, 3)
 ///     max_dist: Furthest distance to neighbouring points before we don't care about them
+///     distance_weight_factor: If `None`, count neighbours within `max_dist` exactly (each
+///         contributes 1). If `Some(p)`, each neighbour instead contributes
+///         `(1 - distance / max_dist).powf(p)`, so contributions run from 1 at zero
+///         distance down to 0 at `max_dist`. Must be non-negative
 ///
 /// Returns:
-///     Indices of neighbouring points (Q, num_neighbours)
-///     Distances of neighbouring points from query point (Q, num_neighbours)
+///     Neighbour count (or distance-weighted sum) for each query point (Q,)
 pub fn count_neighbours_singlethread(
     query_points: ArrayView2<f32>,
     search_points: &Array2<f32>,
     search_points_by_voxel: &HashMap<(i32, i32, i32), Vec<i32>>,
     voxel_offsets: &Array2<i32>,
     max_dist: f32,
-) -> Array1<u32> {
+    distance_weight_factor: Option<f32>,
+) -> Array1<f32> {
     // Group query point indices by voxel into a hashmap indexed by voxel coordinates
     let query_points_by_voxel = _group_by_voxel(query_points, max_dist);
 
@@ -417,11 +421,11 @@ pub fn count_neighbours_singlethread(
 
     // Construct output arrays, initialised with 0s
     let num_query_points = query_points.shape()[0];
-    let mut counts: Array1<u32> = Array1::from_elem([num_query_points], 0u32);
+    let mut counts: Array1<f32> = Array1::from_elem([num_query_points], 0f32);
 
     // Zip search points, query points, and output array chunks together, to be
     // processed in parallel
-    let processed_chunks: Vec<(Array1<u32>, (i32, i32, i32))> = keys
+    let processed_chunks: Vec<(Array1<f32>, (i32, i32, i32))> = keys
         .clone()
         .into_iter()
         .progress_count(keys.len() as u64)
@@ -435,6 +439,7 @@ pub fn count_neighbours_singlethread(
                     search_points_by_voxel,
                     voxel_offsets,
                     max_dist,
+                    distance_weight_factor,
                 ),
                 voxel,
             )
@@ -456,25 +461,27 @@ pub fn count_neighbours_singlethread(
     counts
 }
 
-/// Find the (up to) N nearest neighbours within a given radius for each query point
+/// Count (optionally distance-weighted) neighbours within a given radius for each query point
 ///
 /// Args:
 ///     search_points: Pointcloud we are searching for neighbours within (S, 3)
 ///     query_points: Points we are searching for the neighbours of (Q, 3)
-///     num_neighbours: Maximum number of neighbours to search for
 ///     max_dist: Furthest distance to neighbouring points before we don't care about them
-///     epsilon:
+///     distance_weight_factor: If `None`, count neighbours within `max_dist` exactly (each
+///         contributes 1). If `Some(p)`, each neighbour instead contributes
+///         `(1 - distance / max_dist).powf(p)`, so contributions run from 1 at zero
+///         distance down to 0 at `max_dist`. Must be non-negative
 ///
 /// Returns:
-///     Indices of neighbouring points (Q, num_neighbours)
-///     Distances of neighbouring points from query point (Q, num_neighbours)
+///     Neighbour count (or distance-weighted sum) for each query point (Q,)
 pub fn count_neighbours(
     query_points: ArrayView2<f32>,
     search_points: &Array2<f32>,
     search_points_by_voxel: &HashMap<(i32, i32, i32), Vec<i32>>,
     voxel_offsets: &Array2<i32>,
     max_dist: f32,
-) -> Array1<u32> {
+    distance_weight_factor: Option<f32>,
+) -> Array1<f32> {
     // Group query point indices by voxel into a hashmap indexed by voxel coordinates
     let query_points_by_voxel = _group_by_voxel(query_points, max_dist);
 
@@ -484,11 +491,11 @@ pub fn count_neighbours(
 
     // Construct output arrays, initialised with 0s
     let num_query_points = query_points.shape()[0];
-    let mut counts: Array1<u32> = Array1::from_elem([num_query_points], 0u32);
+    let mut counts: Array1<f32> = Array1::from_elem([num_query_points], 0f32);
 
     // Zip search points, query points, and output array chunks together, to be
     // processed in parallel
-    let processed_chunks: Vec<(Array1<u32>, (i32, i32, i32))> = keys
+    let processed_chunks: Vec<(Array1<f32>, (i32, i32, i32))> = keys
         .clone()
         .into_par_iter()
         .progress_count(keys.len() as u64)
@@ -502,6 +509,7 @@ pub fn count_neighbours(
                     search_points_by_voxel,
                     voxel_offsets,
                     max_dist,
+                    distance_weight_factor,
                 ),
                 voxel,
             )
@@ -532,7 +540,8 @@ fn _count_query_point_voxel(
     search_points_by_voxel: &HashMap<(i32, i32, i32), Vec<i32>>,
     voxel_offsets: &Array2<i32>,
     max_dist: f32,
-) -> Array1<u32> {
+    distance_weight_factor: Option<f32>,
+) -> Array1<f32> {
     // Extract search point neighbours for this voxel
     let (neighbours, _) = _get_neighbouring_search_points(
         voxel,
@@ -552,20 +561,25 @@ fn _count_query_point_voxel(
         });
 
     // Construct output arrays for this chunk
-    let mut counts_chunk: Array1<u32> = Array1::from_elem([query_point_indices.len()], 0u32);
+    let mut counts_chunk: Array1<f32> = Array1::from_elem([query_point_indices.len()], 0f32);
 
     // Map query point processing function across voxels of query points
     this_voxel_query_points
         .axis_iter(Axis(0))
         .zip(counts_chunk.iter_mut())
         .for_each(|(query_point, count)| {
-            *count = _count_query_point_neighbours(query_point, &neighbours, max_dist);
+            *count = _count_query_point_neighbours(
+                query_point,
+                &neighbours,
+                max_dist,
+                distance_weight_factor,
+            );
         });
 
     counts_chunk
 }
 
-/// Count how many neighbours are within a given radius of a query point
+/// Count (optionally distance-weighted) neighbours within a given radius of a query point
 ///
 /// This function is intended to be mapped (maybe in parallel) across rows of an
 /// array of query points, zipped with rows from two mutable arrays for distances
@@ -576,24 +590,63 @@ fn _count_query_point_voxel(
 ///     search_points: Reference to search points array, for indexing and comparing
 ///         distances
 ///     max_dist: Maximum distance to search for neighbours within
+///     distance_weight_factor: If `None`, each neighbour within `max_dist` contributes
+///         exactly 1 to the count. If `Some(p)`, each neighbour within `max_dist` instead
+///         contributes `(1 - distance / max_dist).powf(p)`, which is 1 at zero distance
+///         and falls to 0 at `max_dist`. Assumed to already be validated as non-negative
+///         by the caller
 fn _count_query_point_neighbours(
     query_point: ArrayView1<f32>,
     search_points: &Array2<f32>,
     max_dist: f32,
-) -> u32 {
-    // Construct an iterator of only the neighbours that are within range, and count its
-    // length
-    search_points
-        .axis_iter(Axis(0))
-        .map(|search_point| {
-            let dx = query_point[0] - search_point[0];
-            let dy = query_point[1] - search_point[1];
-            let dz = query_point[2] - search_point[2];
-            (dx * dx + dy * dy + dz * dz).sqrt()
-        })
-        .filter(|distance| *distance < max_dist)
-        .collect::<Vec<_>>()
-        .len() as u32
+    distance_weight_factor: Option<f32>,
+) -> f32 {
+    // Resolve which kernel to apply once per query point, rather than re-checking it for
+    // every candidate neighbour
+    match distance_weight_factor {
+        // Plain count: compare squared distances against the squared radius, so we can
+        // avoid taking a sqrt for every candidate neighbour
+        None => {
+            let max_dist_squared = max_dist * max_dist;
+            search_points
+                .axis_iter(Axis(0))
+                .map(|search_point| {
+                    let dx = query_point[0] - search_point[0];
+                    let dy = query_point[1] - search_point[1];
+                    let dz = query_point[2] - search_point[2];
+                    dx * dx + dy * dy + dz * dz
+                })
+                .filter(|distance_squared| *distance_squared < max_dist_squared)
+                .count() as f32
+        }
+
+        // Linear falloff is the common case, so special-case it to avoid a powf call per
+        // neighbour
+        Some(1.0) => search_points
+            .axis_iter(Axis(0))
+            .map(|search_point| {
+                let dx = query_point[0] - search_point[0];
+                let dy = query_point[1] - search_point[1];
+                let dz = query_point[2] - search_point[2];
+                (dx * dx + dy * dy + dz * dz).sqrt()
+            })
+            .filter(|distance| *distance < max_dist)
+            .map(|distance| 1.0 - distance / max_dist)
+            .sum(),
+
+        // General case: weight each neighbour by (1 - distance / max_dist) ^ p
+        Some(p) => search_points
+            .axis_iter(Axis(0))
+            .map(|search_point| {
+                let dx = query_point[0] - search_point[0];
+                let dy = query_point[1] - search_point[1];
+                let dz = query_point[2] - search_point[2];
+                (dx * dx + dy * dy + dz * dz).sqrt()
+            })
+            .filter(|distance| *distance < max_dist)
+            .map(|distance| (1.0 - distance / max_dist).powf(p))
+            .sum(),
+    }
 }
 
 /// Generate voxel coordinates for each point (i.e. find which voxel each point

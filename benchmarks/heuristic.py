@@ -3,18 +3,21 @@ Score the `method="auto"` rule against the measured benchmark grid
 
     python -m benchmarks.heuristic
 
-`auto` has to choose a backend from what is knowable before any index exists: the
-point count and the grid occupancy (both cheap), never k or the query batch, which the
-caller only supplies later. This module replays the measured grid through the real rule
-(`oxvox.nns.choose_auto_method`, so there is one copy of it) and reports two things:
+`auto` has to choose a backend from what is knowable before an index exists: the cloud
+and the search radius, never `num_neighbours` or the query batch size, which the caller
+only supplies later. This module replays the measured grid through the real rule
+(`oxvox.nns.choose_auto_method`, so there is only ever one copy of it) and reports:
 
-- the hit rate, i.e. how often the rule names the method that actually turned out
-  fastest at that grid point
-- the regret, i.e. how much slower than the fastest method the rule's choice was,
-  which is what a user actually pays for a miss
+- the hit rate: how often the rule names the backend that actually turned out fastest
+- the regret: how much slower than the fastest backend the rule's choice was, which is
+  what a caller actually pays for a miss
+- the same two numbers for every fixed single-backend policy, and for an oracle that is
+  allowed to pick the best backend per (dataset, N, radius) but not per k or per query
+  batch, which is the ceiling any construction-time rule could reach
 
 A hit rate well below 100% with a regret near 1.0 is a good rule on a grid where
-several methods are within noise of each other; a high hit rate with a bad tail is not.
+several backends are within noise of each other; a high hit rate with a bad tail is
+not, and a rule that cannot beat the best fixed choice should not exist.
 """
 
 import argparse
@@ -24,7 +27,7 @@ import statistics
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
 
 from oxvox.nns import EXACT_METHODS, choose_auto_method
 
@@ -34,70 +37,27 @@ logger = logging.getLogger("benchmarks.heuristic")
 
 # Competitor keys of the oxvox backends `auto` can choose between. The grid also
 # measures the voxel backend at two cells per radius, which `auto` cannot ask for, so
-# that configuration is left out of the comparison rather than counted as a method the
-# rule failed to pick
+# that configuration is left out rather than counted as a backend the rule failed to
+# pick
 OXVOX_EXACT_COMPETITORS = {f"oxvox-{method}": method for method in EXACT_METHODS}
 
+# Name given to the construction-time oracle in the report
+ORACLE = "oracle"
 
-class GridFeatures(TypedDict):
+
+def collect_measurements(
+    groups: list[dict[str, Any]],
+) -> dict[tuple[str, int, float, int, int], dict[str, float]]:
     """
-    The features the rule is allowed to see, per (dataset, N, radius) grid column
-    """
-
-
-    num_points: int
-    mean_points_per_cell: float
-    max_points_per_cell: int
-
-
-def extract_features(groups: list[dict[str, Any]]) -> dict[tuple[str, int, float], GridFeatures]:
-    """
-    Pull the grid occupancy the rule needs out of the recorded voxel index builds
-
-    The voxel backend reports its own occupancy after building, and `grid_occupancy`
-    in the Rust extension computes exactly the same numbers without building anything,
-    so the recorded stats stand in for what `auto` would compute at construction time
+    Every kNN measurement of an `auto`-selectable backend, by grid point
 
     Args:
         groups: Parsed results files
 
     Returns:
-        (dataset, N, radius) -> features
+        `(dataset, N, radius, k, Q) -> {method: query seconds}`, restricted to the grid
+        points where every candidate backend ran, since only those compare fairly
     """
-    features: dict[tuple[str, int, float], GridFeatures] = {}
-    for group in groups:
-        dataset = group["dataset"]["label"]
-        num_points = group["dataset"]["num_points"]
-        for record in group["runs"]:
-            if (
-                record["workload"] != "build"
-                or record["competitor"] != "oxvox-voxel"
-                or not record.get("index_stats")
-            ):
-                continue
-            stats = record["index_stats"]
-            features[(dataset, num_points, record["radius"])] = GridFeatures(
-                num_points=num_points,
-                mean_points_per_cell=stats["mean_points_per_cell"],
-                max_points_per_cell=int(stats["max_points_per_cell"]),
-            )
-    return features
-
-
-def evaluate(groups: list[dict[str, Any]]) -> dict[str, Any]:
-    """
-    Replay the grid through the rule and every fixed choice it could have made instead
-
-    Args:
-        groups: Parsed results files
-
-    Returns:
-        Dict with the rule's overall score, its score per dataset, and the score of
-        every fixed single-method policy for comparison
-    """
-    features = extract_features(groups)
-
-    # (dataset, N, radius, k, Q) -> {method: seconds}
     measurements: dict[tuple[str, int, float, int, int], dict[str, float]] = defaultdict(dict)
     for group in groups:
         dataset = group["dataset"]["label"]
@@ -108,50 +68,102 @@ def evaluate(groups: list[dict[str, Any]]) -> dict[str, Any]:
             method = OXVOX_EXACT_COMPETITORS.get(record["competitor"])
             if method is None:
                 continue
-            key = (
-                dataset,
-                num_points,
-                record["radius"],
-                record["num_neighbours"],
-                record["num_queries"],
-            )
-            measurements[key][method] = record["query_seconds"]
+            measurements[
+                (
+                    dataset,
+                    num_points,
+                    record["radius"],
+                    record["num_neighbours"],
+                    record["num_queries"],
+                )
+            ][method] = record["query_seconds"]
 
-    policies = ["auto", *sorted({method for times in measurements.values() for method in times})]
+    candidates = set(OXVOX_EXACT_COMPETITORS.values())
+    return {
+        grid_point: times
+        for grid_point, times in measurements.items()
+        if candidates.issubset(times)
+    }
+
+
+def oracle_choices(
+    measurements: dict[tuple[str, int, float, int, int], dict[str, float]],
+) -> dict[tuple[str, int, float], str]:
+    """
+    The best backend per cloud and radius: the ceiling for any construction-time rule
+
+    The oracle sees a whole column of k and query-batch measurements at once and picks
+    the backend with the lowest mean regret over it. It still cannot pick per k or per
+    batch size, because neither is knowable when the index is built, which is exactly
+    what makes it the right yardstick for `auto`
+
+    Args:
+        measurements: Output of `collect_measurements`
+
+    Returns:
+        `(dataset, N, radius) -> method`
+    """
+    columns: dict[tuple[str, int, float], list[dict[str, float]]] = defaultdict(list)
+    for grid_point, times in measurements.items():
+        columns[grid_point[:3]].append(times)
+
+    choices: dict[tuple[str, int, float], str] = {}
+    for column, rows in columns.items():
+        regrets: dict[str, list[float]] = defaultdict(list)
+        for times in rows:
+            fastest = min(times.values())
+            for method, seconds in times.items():
+                regrets[method].append(seconds / fastest)
+        choices[column] = min(regrets, key=lambda method: statistics.mean(regrets[method]))
+    return choices
+
+
+def evaluate(groups: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Score the rule, every fixed single-backend policy, and the build-time oracle
+
+    Args:
+        groups: Parsed results files
+
+    Returns:
+        Dict with a score per policy, the median regret per dataset, and the oracle's
+        choice per grid column
+    """
+    measurements = collect_measurements(groups)
+    if not measurements:
+        raise SystemExit("no grid point has a measurement for every candidate backend")
+    oracle = oracle_choices(measurements)
+
+    methods = sorted({method for times in measurements.values() for method in times})
+    policies = ["auto", *methods, ORACLE]
     scores: dict[str, dict[str, Any]] = {}
     per_dataset: dict[str, dict[str, float]] = defaultdict(dict)
 
     for policy in policies:
         regrets: list[float] = []
         hits = 0
-        considered = 0
         dataset_regrets: dict[str, list[float]] = defaultdict(list)
         dataset_hits: dict[str, list[int]] = defaultdict(list)
 
-        for key, times in sorted(measurements.items()):
-            dataset, num_points, radius = key[0], key[1], key[2]
+        for grid_point, times in sorted(measurements.items()):
             if policy == "auto":
-                feature = features.get((dataset, num_points, radius))
-                if feature is None:
-                    continue
-                choice = choose_auto_method(**feature)
+                choice = choose_auto_method(num_points=grid_point[1], methods=tuple(times))
+            elif policy == ORACLE:
+                choice = oracle[grid_point[:3]]
             else:
                 choice = policy
-            if choice not in times:
-                continue
-            best = min(times.values())
-            considered += 1
-            regrets.append(times[choice] / best)
-            hits += times[choice] == best
-            dataset_regrets[dataset].append(times[choice] / best)
-            dataset_hits[dataset].append(int(times[choice] == best))
+            fastest = min(times.values())
+            regret = times[choice] / fastest
+            regrets.append(regret)
+            hits += times[choice] == fastest
+            dataset_regrets[grid_point[0]].append(regret)
+            dataset_hits[grid_point[0]].append(int(times[choice] == fastest))
 
-        if not considered:
-            continue
         ordered = sorted(regrets)
         scores[policy] = {
-            "grid_points": considered,
-            "hit_rate": hits / considered,
+            "grid_points": len(ordered),
+            "hit_rate": hits / len(ordered),
+            "mean_regret": statistics.mean(ordered),
             "median_regret": statistics.median(ordered),
             "p90_regret": ordered[int(0.9 * (len(ordered) - 1))],
             "worst_regret": ordered[-1],
@@ -160,7 +172,14 @@ def evaluate(groups: list[dict[str, Any]]) -> dict[str, Any]:
             per_dataset[dataset][policy] = statistics.median(values)
             per_dataset[dataset][f"{policy} hit rate"] = statistics.mean(dataset_hits[dataset])
 
-    return {"policies": scores, "per_dataset": dict(per_dataset)}
+    return {
+        "policies": scores,
+        "per_dataset": dict(per_dataset),
+        "oracle_choices": {
+            f"{dataset} N={num_points} r={radius:.5g}": method
+            for (dataset, num_points, radius), method in sorted(oracle.items())
+        },
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -191,13 +210,17 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(scores, indent=1, sort_keys=True))
         return 0
 
-    print(f"{'policy':10} {'grid points':>12} {'hit rate':>9} {'median':>8} {'p90':>8} {'worst':>8}")
+    print(
+        f"{'policy':10} {'grid points':>11} {'fastest':>8} {'mean':>7} "
+        f"{'median':>7} {'p90':>7} {'worst':>7}"
+    )
     for policy, score in scores["policies"].items():
         print(
-            f"{policy:10} {score['grid_points']:>12} {score['hit_rate']:>8.0%} "
-            f"{score['median_regret']:>7.2f}x {score['p90_regret']:>7.2f}x "
-            f"{score['worst_regret']:>7.2f}x"
+            f"{policy:10} {score['grid_points']:>11} {score['hit_rate']:>7.0%} "
+            f"{score['mean_regret']:>6.2f}x {score['median_regret']:>6.2f}x "
+            f"{score['p90_regret']:>6.2f}x {score['worst_regret']:>6.2f}x"
         )
+
     print("\nmedian regret per dataset, by policy")
     for dataset, policies in sorted(scores["per_dataset"].items()):
         rendered = "  ".join(
@@ -205,7 +228,15 @@ def main(argv: list[str] | None = None) -> int:
             for policy, value in sorted(policies.items())
             if not policy.endswith("hit rate")
         )
-        print(f"  {dataset:18} {rendered}")
+        print(f"  {dataset:14} {rendered}")
+
+    oracle_counts: dict[str, int] = defaultdict(int)
+    for method in scores["oracle_choices"].values():
+        oracle_counts[method] += 1
+    print(
+        "\nthe oracle's per-cloud choices: "
+        + ", ".join(f"{method} {count}" for method, count in sorted(oracle_counts.items()))
+    )
     return 0
 
 

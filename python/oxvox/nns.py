@@ -2,6 +2,7 @@
 Python wrapper around Rust NNS engine for typing stubs and interpreter help
 """
 
+from collections.abc import Sequence
 from typing import Literal
 
 import numpy as np
@@ -15,6 +16,61 @@ Method = Literal["voxel", "kdtree", "hybrid", "graph", "kiddo", "auto"]
 
 # Methods that return exactly the brute-force answer (everything except "graph")
 EXACT_METHODS = ("voxel", "kdtree", "hybrid", "kiddo")
+
+# What `method="auto"` resolves to, and what it falls back to if that method is somehow
+# not compiled in. See `choose_auto_method` for the evidence behind the choice
+AUTO_METHOD = "kdtree"
+AUTO_FALLBACK_METHODS = ("kdtree", "hybrid", "voxel")
+
+
+def choose_auto_method(num_points: int, methods: Sequence[str] | None = None) -> str:
+    """
+    The rule behind `method="auto"`: which index to build, knowing only the cloud
+
+    The benchmark under `benchmarks/` measured every backend against scipy's cKDTree
+    and Open3D's hybrid search over five synthetic pointcloud families and two real
+    laser scans, at point counts from 1e4 to 1.6e7, four neighbour densities, k in
+    {1, 8, 64} and query batches from 1e3 to 4e6. Its answer for the choice of oxvox
+    backend is blunt: the hand-rolled `kdtree` is the fastest of them at most grid
+    points, is the fastest or within noise of it at the median, and no rule based on
+    what is knowable at construction time does better.
+
+    That last part is the interesting one. Which backend wins a given query is decided
+    mostly by `num_neighbours` and the size of the query batch, and neither is known
+    when the index is built. Scoring every backend as a fixed choice over the 707 grid
+    points where all four ran, and comparing them with the best possible
+    construction-time rule (an oracle allowed to pick the best backend per cloud and
+    radius, but not per k or per batch size), gives:
+
+        always kdtree     fastest at 56% of grid points, median 1.00x, p90 1.48x
+        always kiddo      fastest at 39%, median 1.09x, p90 2.31x
+        always voxel      fastest at  3%, median 1.71x, p90 4.88x
+        always hybrid     fastest at  2%, median 1.82x, p90 3.86x
+        oracle ceiling    fastest at 70%, median 1.00x, p90 1.20x
+
+    Rules keyed on the grid occupancy (mean and maximum points per cell, both cheap to
+    compute before building) were tried against the same grid and bought two points of
+    hit rate while making the worst case worse, i.e. nothing. So `auto` picks the
+    KD-tree, and `benchmarks/heuristic.py` re-scores this function against the recorded
+    results if the question is ever reopened on other hardware.
+
+    Args:
+        num_points: How many search points the index will hold. Recorded because it is
+            the one construction-time feature a future rule would most likely use; the
+            current rule does not branch on it
+        methods: Methods available to choose from, defaulting to everything compiled
+            into this build
+
+    Returns:
+        The name of the method to build, which is always one of `EXACT_METHODS`
+    """
+    available = tuple(methods) if methods is not None else tuple(available_methods())
+    del num_points  # the rule the benchmark supports does not branch on anything
+
+    for method in (AUTO_METHOD, *AUTO_FALLBACK_METHODS):
+        if method in available:
+            return method
+    raise ValueError(f"no exact search method available to choose from, got {available!r}")
 
 
 class OxVoxNNS:
@@ -39,7 +95,11 @@ class OxVoxNNS:
             returns a point outside the radius, but may miss some neighbours
         "kiddo": The ``kiddo`` crate's KD-tree, only present in builds compiled with
             the ``kiddo-baseline`` cargo feature (used for benchmarking)
-        "auto": Currently resolves to "voxel"; a data-driven heuristic is planned
+        "auto": Let oxvox choose. On the benchmark in ``benchmarks/`` this resolves to
+            "kdtree", which is the fastest exact backend at just over half of the
+            measured grid points and close to the fastest almost everywhere else; see
+            ``choose_auto_method`` for the numbers and for why no cleverer rule is
+            shipped
     """
 
     def __init__(
@@ -78,8 +138,10 @@ class OxVoxNNS:
         # only have 32-bit values
         search_points = self._sanitise_points(search_points)
 
-        # "auto" is a placeholder until the benchmark-derived heuristic lands
-        resolved_method = "voxel" if method == "auto" else method
+        # "auto" asks oxvox to choose; everything else is taken literally
+        resolved_method = (
+            choose_auto_method(num_points=len(search_points)) if method == "auto" else method
+        )
 
         # Construct internal rust neighbour searcher
         self.engine = OxVoxNNSEngine(
@@ -212,4 +274,10 @@ class OxVoxNNS:
         return np.ascontiguousarray(points, dtype=np.float32)
 
 
-__all__ = ["OxVoxNNS", "Method", "EXACT_METHODS", "available_methods"]
+__all__ = [
+    "OxVoxNNS",
+    "Method",
+    "EXACT_METHODS",
+    "available_methods",
+    "choose_auto_method",
+]

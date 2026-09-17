@@ -452,7 +452,7 @@ def render_summary_tiles(model: ReportModel) -> str:
         (
             "Median speed-up vs scipy",
             f"{median_speed_up:.1f}x",
-            f"{leader_label}, worst case {worst_speed_up:.2f}x",
+            f"{leader_label}; its worst grid point is {1 / worst_speed_up:.1f}x slower",
         ),
         (
             "Datasets",
@@ -664,6 +664,76 @@ def render_correctness_table(model: ReportModel) -> str:
     )
 
 
+def render_correctness_note(model: ReportModel) -> str:
+    """
+    A sentence on the only disagreement the exact implementations show, from the data
+
+    Args:
+        model: The extracted results
+
+    Returns:
+        HTML paragraph, or an empty string if nothing disagreed
+    """
+    disagreements = [
+        (key, value)
+        for key, value in model.count_agreement.items()
+        if value < 1.0 and model.competitor_specs[key[3]]["exact"]
+    ]
+    if not disagreements:
+        return ""
+    datasets = sorted({key[0] for key, _ in disagreements})
+    radii = sorted({key[2] for key, _ in disagreements})
+    worst = min(value for _, value in disagreements)
+    return (
+        f"<p>The exact backends reproduce scipy's neighbour counts on every check but "
+        f"{len(disagreements)} of {len(model.count_agreement)}, and there they differ by "
+        f"one neighbour in {1 - worst:.1%} of query points, only on "
+        f"{', '.join(html.escape(dataset) for dataset in datasets)} at "
+        f"{', '.join(f'{radius:g} m' for radius in radii)}. That is the radius boundary, "
+        "not a bug: scipy counts a point at exactly the radius, oxvox does not "
+        "(<code>d&sup2; &lt; r&sup2;</code>), and a real scan's quantised coordinates put "
+        "points exactly there.</p>"
+    )
+
+
+def render_recall_note(model: ReportModel) -> str:
+    """
+    The approximate backend's recall, as numbers rather than only as a heatmap
+
+    Args:
+        model: The extracted results
+
+    Returns:
+        HTML paragraph
+    """
+    recalls = sorted(
+        value
+        for key, value in model.recall.items()
+        if not model.competitor_specs[key[4]]["exact"]
+    )
+    counts = sorted(
+        value
+        for key, value in model.count_agreement.items()
+        if not model.competitor_specs[key[3]]["exact"]
+    )
+    if not recalls:
+        return ""
+    above_99 = sum(1 for value in recalls if value >= 0.99) / len(recalls)
+    note = (
+        f"<p>Over {len(recalls)} checks its kNN recall has a median of "
+        f"{recalls[len(recalls) // 2]:.4f}, a minimum of {recalls[0]:.4f}, and is at least "
+        f"0.99 on {above_99:.0%} of them."
+    )
+    if counts:
+        note += (
+            f" Counting is the workload it cannot do: its exact-count agreement falls as low "
+            f"as {counts[0]:.1%} of query points on the dense clouds, because a flood that "
+            "stops at the k-th best neighbour has no reason to visit every point in the "
+            "radius."
+        )
+    return note + "</p>"
+
+
 def render_skipped_table(model: ReportModel) -> str:
     """
     The configurations that were not measured, and why
@@ -779,7 +849,11 @@ a { color: inherit; }
 select { font: inherit; text-transform: none; letter-spacing: normal; color: var(--text-primary);
          background: var(--surface); border: 1px solid var(--border); border-radius: 7px;
          padding: 6px 8px; min-width: 130px; }
-.panel-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+.panel-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 4px 0 10px; }
+.legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px;
+               color: var(--text-secondary); }
+.legend-swatch { width: 14px; height: 3px; border-radius: 2px; flex: none; }
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
          padding: 12px 12px 4px; }
 .plot { width: 100%; height: 260px; }
@@ -838,6 +912,7 @@ skipped as projected too slow &mdash; the skip table at the bottom says which.</
   <label>Radius column<select id="density"></select></label>
   <label>Query batch<select id="queries"></select></label>
 </div>
+<div class="legend" id="time-legend"></div>
 <div class="panel-grid" id="time-grid"></div>
 
 <h2>Where the index build stops paying for itself</h2>
@@ -849,6 +924,7 @@ the crossing point is the batch size above which the better query time takes ove
   <label>Radius column<select id="bq-density"></select></label>
   <label>Neighbours (k)<select id="bq-k"></select></label>
 </div>
+<div class="legend" id="build-legend"></div>
 <div class="panel"><div id="build-plot" class="plot-wide"></div></div>
 
 <h2>Counting neighbours</h2>
@@ -859,18 +935,21 @@ count query. Log-log, one panel per dataset.</p>
   <label>Radius column<select id="count-density"></select></label>
   <label>Query batch<select id="count-queries"></select></label>
 </div>
+<div class="legend" id="count-legend"></div>
 <div class="panel-grid" id="count-grid"></div>
 
 <h2>How much the approximate backend misses</h2>
 <p>Recall of the <code>graph</code> backend against scipy's answers, on the 2048-query
 correctness subsample: the fraction of the true neighbours it returned. It never
 returns a point outside the radius, so what recall measures is omission, not error.</p>
+__RECALL_NOTE__
 <div class="panel"><div id="recall-plot" class="plot-wide"></div></div>
 
 <h2>Correctness</h2>
 <p>Every exact implementation has to reproduce scipy's distances. Index sets are only
 compared where the distances are all distinct, since a tie lets any implementation
 return either point.</p>
+__CORRECTNESS_NOTE__
 __CORRECTNESS__
 
 <h2>Fastest exact method at every grid point</h2>
@@ -946,7 +1025,7 @@ function baseLayout(xTitle, yTitle, options = {}) {
     automargin: true,
   };
   return {
-    margin: { l: 52, r: 12, t: 8, b: 40 },
+    margin: { l: 52, r: 20, t: 8, b: 40 },
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(0,0,0,0)",
     font: { family: 'system-ui, -apple-system, "Segoe UI", sans-serif', color: colours.secondary },
@@ -965,6 +1044,27 @@ function baseLayout(xTitle, yTitle, options = {}) {
 }
 
 const PLOT_CONFIG = { displayModeBar: false, responsive: true };
+
+/* One legend per section, in HTML: eight Plotly legends would not fit a small panel,
+   and identity must never rest on colour alone */
+function renderLegend(containerId, competitorIndices) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = competitorIndices
+    .map(
+      (index) =>
+        `<span class="legend-item"><span class="legend-swatch" style="background:${seriesColour(
+          index
+        )}"></span>${DATA.competitors[index].label}</span>`
+    )
+    .join("");
+}
+
+/* Ticks only at the measured values: a log axis otherwise labels every minor tick and
+   the labels collide */
+function logTicks(values) {
+  return { tickvals: values, ticktext: values.map(formatCount) };
+}
 
 /* ---------- query time / speed-up small multiples ---------- */
 
@@ -987,6 +1087,13 @@ function renderTimeGrid() {
   const wantedQueries = document.getElementById("queries").value;
   const container = document.getElementById("time-grid");
   container.innerHTML = "";
+  renderLegend(
+    "time-legend",
+    competitorsPresent(DATA.find, FIND.competitor).filter(
+      (index) => metric !== "speedup" || index !== DATA.reference
+    )
+  );
+  const pending = [];
 
   DATA.datasets.forEach((label, datasetIndex) => {
     const rows = DATA.find.filter(
@@ -1087,15 +1194,31 @@ function renderTimeGrid() {
       }</div>` +
       `<div class="plot" id="time-plot-${datasetIndex}"></div>`;
     container.appendChild(panel);
-    Plotly.newPlot(
-      `time-plot-${datasetIndex}`,
-      traces,
-      baseLayout("search points (N)", metric === "speedup" ? "times faster than scipy" : "query time (s)", {
-        showlegend: true,
-      }),
-      PLOT_CONFIG
-    );
+    pending.push({ id: `time-plot-${datasetIndex}`, traces, sizes });
   });
+
+  // Plot only once every panel is in the DOM: a plot drawn while the grid is still
+  // growing measures a container width that the next panel then takes away from it
+  pending.forEach(({ id, traces, sizes }) =>
+    Plotly.newPlot(
+      id,
+      traces,
+      baseLayout(
+        "search points (N)",
+        metric === "speedup" ? "times faster than scipy" : "query time (s)",
+        {
+          layout: {
+            xaxis: {
+              ...baseLayout("", "").xaxis,
+              title: { text: "search points (N)" },
+              ...logTicks(sizes),
+            },
+          },
+        }
+      ),
+      PLOT_CONFIG
+    )
+  );
 }
 
 /* ---------- build + query against query count ---------- */
@@ -1116,6 +1239,7 @@ function renderBuildChart() {
       row[FIND.k] === wantedK
   );
   const queries = uniqueSorted(rows.map((row) => row[FIND.q]));
+  renderLegend("build-legend", competitorsPresent(rows, FIND.competitor));
   const traces = [];
   DATA.competitors.forEach((competitor, competitorIndex) => {
     const own = rows.filter((row) => row[FIND.competitor] === competitorIndex);
@@ -1137,14 +1261,21 @@ function renderBuildChart() {
   Plotly.newPlot(
     "build-plot",
     traces,
-    baseLayout("queries answered", "build + query time (s)", { showlegend: true }),
+    baseLayout("queries answered", "build + query time (s)", {
+      layout: {
+        xaxis: {
+          ...baseLayout("", "").xaxis,
+          title: { text: "queries answered" },
+          ...logTicks(queries),
+        },
+      },
+    }),
     PLOT_CONFIG
   );
   if (!traces.length) {
     document.getElementById("build-plot").innerHTML =
       '<p class="muted">nothing measured for this combination</p>';
   }
-  void queries;
 }
 
 /* ---------- count workload ---------- */
@@ -1154,6 +1285,8 @@ function renderCountGrid() {
   const wantedQueries = document.getElementById("count-queries").value;
   const container = document.getElementById("count-grid");
   container.innerHTML = "";
+  renderLegend("count-legend", competitorsPresent(DATA.count, COUNT.competitor));
+  const pending = [];
 
   DATA.datasets.forEach((label, datasetIndex) => {
     const rows = DATA.count.filter(
@@ -1210,13 +1343,25 @@ function renderCountGrid() {
     panel.className = "panel";
     panel.innerHTML = `<h3>${label}</h3><div class="plot" id="count-plot-${datasetIndex}"></div>`;
     container.appendChild(panel);
-    Plotly.newPlot(
-      `count-plot-${datasetIndex}`,
-      traces,
-      baseLayout("search points (N)", "count time (s)", { showlegend: true }),
-      PLOT_CONFIG
-    );
+    pending.push({ id: `count-plot-${datasetIndex}`, traces, sizes });
   });
+
+  pending.forEach(({ id, traces, sizes }) =>
+    Plotly.newPlot(
+      id,
+      traces,
+      baseLayout("search points (N)", "count time (s)", {
+        layout: {
+          xaxis: {
+            ...baseLayout("", "").xaxis,
+            title: { text: "search points (N)" },
+            ...logTicks(sizes),
+          },
+        },
+      }),
+      PLOT_CONFIG
+    )
+  );
 }
 
 /* ---------- recall of the approximate backend ---------- */
@@ -1296,6 +1441,12 @@ function renderEverything() {
   renderBuildChart();
   renderCountGrid();
   renderRecall();
+}
+
+/* Which competitors appear in a section, in the fixed slot order */
+function competitorsPresent(rows, columnIndex) {
+  const present = new Set(rows.map((row) => row[columnIndex]));
+  return DATA.competitors.map((_, index) => index).filter((index) => present.has(index));
 }
 
 function setUpControls() {
@@ -1421,6 +1572,8 @@ def build_html(model: ReportModel) -> str:
         "__TILES__": render_summary_tiles(model),
         "__HEADLINE__": render_headline_table(model),
         "__CORRECTNESS__": render_correctness_table(model),
+        "__CORRECTNESS_NOTE__": render_correctness_note(model),
+        "__RECALL_NOTE__": render_recall_note(model),
         "__WINNERS__": render_winner_table(model),
         "__SKIPPED__": render_skipped_table(model),
         "__DATA__": json.dumps(model.chart_payload(), separators=(",", ":")),

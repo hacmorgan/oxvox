@@ -18,7 +18,7 @@ import pickle
 import numpy as np
 import pytest
 
-from oxvox.nns import EXACT_METHODS, OxVoxNNS, available_methods
+from oxvox.nns import EXACT_METHODS, OxVoxNNS, available_methods, choose_auto_method
 
 # Every exact search method compiled into this build gets the same test suite; the
 # approximate "graph" method gets its own recall tests below
@@ -273,12 +273,37 @@ def test_unknown_method_raises() -> None:
         OxVoxNNS(TEST_SEARCH_POINTS, 1.0, method="octree")  # type: ignore[arg-type]
 
 
-def test_auto_method_resolves_to_voxel() -> None:
+def test_auto_method_picks_an_exact_method() -> None:
     """
-    Until the benchmark-derived heuristic lands, "auto" means "voxel"
+    "auto" resolves to an exact method that this build actually has
+
+    The benchmark behind the rule can be re-run and the rule changed, so the test pins
+    the contract ("auto" is exact, available and answers like any other method) rather
+    than the current answer
     """
     nns = OxVoxNNS(TEST_SEARCH_POINTS, 1.0, method="auto")
-    assert nns.method == "voxel"
+
+    assert nns.method in EXACT_METHODS
+    assert nns.method in available_methods()
+
+    # The chosen method must answer queries like the method chosen by name does
+    chosen = OxVoxNNS(TEST_SEARCH_POINTS, 1.0, method=nns.method)
+    auto_indices, auto_distances = nns.find_neighbours(TEST_SEARCH_POINTS, 2)
+    named_indices, named_distances = chosen.find_neighbours(TEST_SEARCH_POINTS, 2)
+    assert np.array_equal(auto_indices, named_indices)
+    assert np.allclose(auto_distances, named_distances)
+
+
+def test_choose_auto_method_falls_back_to_what_is_available() -> None:
+    """
+    The rule only ever names a method it was told is available, and says so if it can't
+    """
+    assert choose_auto_method(num_points=1_000) in EXACT_METHODS
+    assert choose_auto_method(num_points=1_000, methods=("voxel", "graph")) == "voxel"
+    assert choose_auto_method(num_points=10**9, methods=("hybrid",)) == "hybrid"
+
+    with pytest.raises(ValueError):
+        choose_auto_method(num_points=1_000, methods=("graph",))
 
 
 def test_grid_stats_only_for_voxel_method() -> None:

@@ -1,9 +1,11 @@
 # OxVox - **Ox**idised **Vox**elised toolkit
 
-[![PyPI](https://img.shields.io/pypi/v/cibuildwheel.svg)](https://pypi.org/project/oxvox/)
+[![PyPI](https://img.shields.io/pypi/v/oxvox.svg)](https://pypi.org/project/oxvox/)
 [![Actions Status](https://github.com/hacmorgan/oxvox/workflows/CI/badge.svg)](https://github.com/hacmorgan/oxvox/actions)
 
 A collection of operations on arrays and pointclouds implemented in Rust
+
+Requires Python 3.10 or newer.
 
 
 ## Installation
@@ -48,43 +50,45 @@ Unique value: (4,) at row indices [4 5]
 ```
 
 ### Nearest Neighbour Search (NNS)
-Basic usage, query a block of query points in **sparse** mode:
+`OxVoxNNS` buckets `search_points` into voxels of side `search_radius`, then answers
+queries by scanning the 27-voxel neighbourhood around each query point. Construct one
+`OxVoxNNS` per pointcloud and reuse it for as many queries as needed (e.g. to query in
+batches, or to distribute the object across processes: it pickles):
 ```python
 import numpy as np
 from oxvox.nns import OxVoxNNS
 
 NUM_POINTS = 100_000
-TEST_POINTS = np.random.random((NUM_POINTS, 3))
+SEARCH_RADIUS = 0.05
+search_points = np.random.random((NUM_POINTS, 3)).astype(np.float32)
+query_points = np.random.random((NUM_POINTS, 3)).astype(np.float32)
 
-indices, distances = OxVoxNNS(
-    search_points=TEST_POINTS,
-    max_dist=0.05,
-).find_neighbours(
-    query_points=TEST_POINTS,
-    num_neighbours=1000,
-    sparse=True,
-)
+nns = OxVoxNNS(search_points, SEARCH_RADIUS)
+
+# Find up to `num_neighbours` nearest neighbours per query point. `indices`/`distances`
+# are (Q, num_neighbours) arrays, padded with -1 where fewer neighbours were found
+indices, distances = nns.find_neighbours(query_points, num_neighbours=10)
+
+# Count neighbours within the search radius per query point (a uint32 exact count)
+counts = nns.count_neighbours(query_points)
+
+# Or weight each neighbour's contribution by how close it is, via the normalised
+# kernel w = (1 - distance / search_radius) ** distance_weight_factor. This is 1 at
+# zero distance and falls smoothly to 0 at the search radius; distance_weight_factor=0
+# reproduces the exact count above, larger values concentrate weight near the query
+weighted_counts = nns.count_neighbours(query_points, distance_weight_factor=1.0)
 ```
 
-More complex usage, using a single NNS object for multiple *exact* mode queries (e.g. to distribute the `nns` object and perform queries in parallel, or to query from a large number of query points in batches/chunks)
-```python
-# same imports and test data as above
-
-nns = ox_vox_nns.OxVoxNNS(TEST_POINTS, 0.1)
-
-for query_points_chunk in query_points_chunks:
-    chunk_indices, chunk_distances = nns.find_neighbours(
-        query_points=query_points_chunk,
-        num_neighbours=1,
-        sparse=False,
-    )
-```
+`find_neighbours` and `count_neighbours` both take a `num_threads` argument (default
+`0`, meaning "use all available CPUs"); `find_neighbours` also takes an `epsilon`,
+below which a candidate neighbour is accepted without further sorting, which can help
+avoid getting bogged down in very dense regions of the search points.
 
 
 ## Tests
 All test files are executable for spot-testing functionality
 
-To run all tests:
+To run all tests (Rust unit tests, then Python tests):
 ```bash
 make test
 ```
@@ -110,18 +114,21 @@ maturin generate-ci github > .github/workflows/CI.yml
 patch .github/workflows/CI.yml /tmp/CI.patch
 ```
 
-4. Update `cargo.toml`
+4. Update the version in `Cargo.toml` (this is the single source of truth for the
+   package version; `pyproject.toml` picks it up via `dynamic = ["version"]`)
 ```toml
 [package]
 name = "oxvox"
-version = "0.7.1"
+version = "1.0.0"
 ...
 ```
 
-5. Tag with version number and push
+5. Commit `Cargo.lock` along with the version bump (it is tracked, not gitignored, so
+   every release builds from exactly the dependency versions that were tested)
+
+6. Tag with version number and push
 ```bash
-git commit -am "Push version 0.7.1"
-git tag 0.7.1
+git commit -am "Push version 1.0.0"
+git tag 1.0.0
 git push --tags
 ```
-

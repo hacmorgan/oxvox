@@ -1,6 +1,6 @@
 [package]
 name = "oxvox"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 authors = ["Hamish Morgan <ham430@gmail.com>"]
 description = "Performant operations on array & pointcloud data, written in Rust"

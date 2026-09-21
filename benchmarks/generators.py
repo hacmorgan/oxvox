@@ -87,7 +87,7 @@ def gaussian_clusters(
     weights = rng.random(size=num_clusters) + 0.2
     counts = np.diff(
         np.round(np.concatenate([[0.0], np.cumsum(weights) / weights.sum()]) * num_points)
-    ).astype(np.int64)
+    ).astype(np.intp)
 
     points = np.repeat(centres, repeats=counts, axis=0)
     points += rng.normal(loc=0.0, scale=spread, size=points.shape).astype(np.float32)

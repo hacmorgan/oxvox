@@ -238,23 +238,28 @@ fn _check_three_columns(name: &str, shape: &[usize]) -> PyResult<()> {
 
 /// Rust engine for computing row indices for each unique value in a field or fields in a pointcloud
 ///
-/// Runs in O(n+u) time: one pass over `counts` to size each unique id's output array,
-/// then a single sequential pass over `unique_ids`, writing each row index into its
-/// id's array via a per-id write cursor
+/// Runs in O(n+u) time: one pass over `counts` to size each id's output array, then a
+/// single sequential pass over `row_ids`, writing each row index into its id's array
+/// via a per-id write cursor
+///
+/// The contract is checked both ways: every id must be a valid index into `counts`, and
+/// `counts[id]` must equal exactly the number of rows carrying that id. Anything else
+/// raises `ValueError` rather than returning an array padded with phantom row-0 indices
 ///
 /// Args:
-///     unique_ids: Array of unique IDs for each point in the pointcloud (same length as the pointcloud)
-///     counts: Array of counts for each unique ID
+///     row_ids: The group id of every row of the pointcloud (one entry per row, values
+///         in `0..len(counts)`)
+///     counts: How many rows carry each id
 ///
 /// Returns:
-///     Dict mapping each unique ID to the row indices in the pointcloud with that ID
+///     Dict mapping each id to the row indices carrying it, in ascending row order
 #[pyfunction]
 pub fn indices_by_field<'py>(
     py: Python<'py>,
-    unique_ids: PyReadonlyArray1<'py, i64>,
+    row_ids: PyReadonlyArray1<'py, i64>,
     counts: PyReadonlyArray1<'py, i64>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let unique_ids = unique_ids.as_array();
+    let row_ids = row_ids.as_array();
     let counts = counts.as_array();
 
     // Allocate one output array per unique id, sized exactly by its count
@@ -264,10 +269,10 @@ pub fn indices_by_field<'py>(
         .collect();
 
     // Track how far each id's output array has been filled, so the whole sweep over
-    // unique_ids below is a single O(n) pass rather than one pass per unique id
+    // row_ids below is a single O(n) pass rather than one pass per unique id
     let mut write_cursors: Vec<usize> = vec![0; counts.len()];
 
-    for (row, &id) in unique_ids.iter().enumerate() {
+    for (row, &id) in row_ids.iter().enumerate() {
         // Reject ids that don't index `counts`, and ids that appear more often than
         // their count claims, with a Python exception rather than a panic
         let id = usize::try_from(id)
@@ -282,6 +287,17 @@ pub fn indices_by_field<'py>(
         }
         indices_by_id[id][*cursor] = row as u64;
         *cursor += 1;
+    }
+
+    // An overstated count would leave zero-initialised slots that read as references to
+    // row 0, so reject any id that appeared fewer times than its count claims
+    for (id, (&cursor, indices)) in write_cursors.iter().zip(&indices_by_id).enumerate() {
+        if cursor != indices.len() {
+            return Err(PyValueError::new_err(format!(
+                "unique id {id} appears {cursor} times but its count is {}",
+                indices.len()
+            )));
+        }
     }
 
     let dict = PyDict::new(py);

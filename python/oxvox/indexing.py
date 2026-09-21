@@ -59,10 +59,13 @@ def indices_by_field(
 
         n.b. If you don't need the values in the array, and are happy with unique
         sequential IDs as dictionary keys, you can use the underlying
-        `indices_by_field_rust` directly:
+        `indices_by_field_rust(row_ids, counts)` directly, where `row_ids` holds each
+        row's group id (values in `0..len(counts)`) and `counts[id]` is exactly how many
+        rows carry that id. Both sides of that contract are checked, and a mismatch
+        raises `ValueError` rather than returning padded indices:
 
             for offset, indices in enumerate(
-                indices_by_field_rust(unique_ids, counts).values()
+                indices_by_field_rust(row_ids, counts).values()
             ):
                 arr[indices] += offset
     """

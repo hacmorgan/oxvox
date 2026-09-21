@@ -66,6 +66,11 @@
   re-scores the rule against the recorded results.
 
 ### Fixed
+- `indices_by_field` now rejects a count that overstates how often an id appears
+  (`ValueError`), as it already did for understated counts and out-of-range ids. An
+  overstated count used to yield an array padded with phantom references to row 0, the
+  same failure shape as the 0.7.2 bug. Unreachable through `oxvox.indexing`, which
+  derives exact counts, but reachable by callers of the Rust function directly.
 - Building an index in a process forked from one that had already used oxvox hung
   forever: index builds ran on rayon's global thread pool, whose threads do not survive
   `fork`. Builds now run on a per-call pool like queries already did, so `OxVoxNNS`
@@ -101,6 +106,10 @@
   views work.
 
 ### Breaking
+- The Rust-level `indices_by_field` renamed its first parameter from `unique_ids` to
+  `row_ids`: it is the per-row array of group ids, and the old name is what the 0.7.2
+  off-by-one misread as a group count. Positional callers (including `oxvox.indexing`)
+  are unaffected.
 - `OxVoxNNSEngine` constructor and method signatures changed (keyword arguments
   `method`, `cells_per_radius`, `progress`). The Python `OxVoxNNS` wrapper is
   backwards compatible for positional use. Pickles from 1.0.0 do not load in 1.1.0.
@@ -130,11 +139,20 @@
   and installs its own thread pool for the duration of that call.
 - `indices_by_field` (the Rust engine behind `oxvox.indexing.indices_by_field`) is now
   a single O(n+u) sequential pass with a per-id write cursor, replacing the previous
-  O(n·u) loop (one pass per unique id). Output is unchanged.
+  O(n·u) loop (one pass per unique id). This also fixed the off-by-one described under
+  Fixed below; an earlier version of this entry wrongly said the output was unchanged.
 - Migrated to pyo3 0.29 / numpy 0.29 (from pyo3 0.18 / numpy 0.18) and ndarray 0.17.2
   (from 0.15.6), and moved to Rust edition 2024.
 
 ### Fixed
+- `indices_by_field` dropped the final row and reported row 0 twice whenever a group
+  held `n - 1` or more of the `n` rows, in practice whenever the field had a single
+  value. The 0.7.2 implementation looped once per group with an early exit that
+  compared the group's write position against the row count instead of the group's own
+  count, so the last slot of such a group kept its zero initial value. Arrays with
+  several comparable groups were unaffected, which is why the one existing test never
+  saw it. Anyone remapping values through `indices_by_field` on single-valued fields
+  under 0.7.2 or earlier got the last row unmapped.
 - The Linux CI job's test step ran `make test -vvv`; GNU make treats `-v` as
   `--version` and exits without running any target, so Linux CI has never actually
   run the test suite. It now runs `make test`.
